@@ -104,3 +104,5 @@ def test_single_vs_double_grad():
     _block(torch.tensor(2.0, requires_grad=True, dtype=torch.double))
     _block(torch.rand(10, 3, requires_grad=True, dtype=torch.double))
     _block(torch.rand(10, 3, 4, requires_grad=True, dtype=torch.double))
+
+

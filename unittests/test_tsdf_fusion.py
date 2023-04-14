@@ -223,13 +223,21 @@ if __name__ == "__main__":
     weight = fuser.grid.embeddings[..., -1].contiguous()
 
     positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=True)
+
+    embeddings, masks = fuser.grid(positions, interpolation="linear")
+    colors = embeddings[..., 1:4]
     pcd = o3d.t.geometry.PointCloud(positions.cpu().numpy())
+    pcd.point["colors"] = colors.detach().cpu().numpy()
     pcd.estimate_normals()
     o3d.visualization.draw(pcd)
 
     triangles, positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=False)
+    embeddings, masks = fuser.grid(positions, interpolation="linear")
+    colors = embeddings[..., 1:4]
+
     mesh = o3d.t.geometry.TriangleMesh()
     mesh.vertex["positions"] = positions.cpu().numpy()
+    mesh.vertex["colors"] = colors.detach().cpu().numpy()
     mesh.triangle["indices"] = triangles.cpu().numpy()
     mesh.compute_vertex_normals()
     o3d.visualization.draw([mesh.to_legacy(), pcd])

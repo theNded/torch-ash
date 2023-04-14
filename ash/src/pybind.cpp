@@ -25,6 +25,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     hashmap.def("size", &HashMap::size);
     hashmap.def("device", &HashMap::device);
 
+    m.def("query_forward", &query_forward, "Query forward");
     m.def("isosurface_extraction", &isosurface_extraction,
           "Isosurface extraction");
     m.def("marching_cubes", &marching_cubes, "Marching cubes");
