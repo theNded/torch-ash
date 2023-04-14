@@ -145,14 +145,12 @@ __global__ void query_backward_forward_kernel(
         int sparse_nb = 0;
 
         float weight = 1.0;
-        MiniVec<float, 3> weight_grad = MiniVec<float, 3>::zeros();
         for (int d = 0; d < 3; ++d) {
             int dim_code = (nb >> d) & 1;
             sparse_nb = (dense_coord[d] + (dim_code) == dense_grid_dim)
                                 ? (sparse_nb | (1 << d))
                                 : sparse_nb;
             float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            float dw = (dim_code) ? (1) : (-1);
             weight *= w;
         }
         int sparse_nb_index = sparse_neighbors[sparse_nb];
@@ -161,12 +159,15 @@ __global__ void query_backward_forward_kernel(
         }
         sum_weight += weight;
     }
+    if (sum_weight == 0) {
+        return;
+    }
 
     for (int nb = 0; nb < 8; ++nb) {
         int sparse_nb = 0;
 
         float weight = 1.0;
-        MiniVec<float, 3> weight_grad = MiniVec<float, 3>::zeros();
+        MiniVec<float, 3> weight_grad = MiniVec<float, 3>::ones();
         for (int d = 0; d < 3; ++d) {
             int dim_code = (nb >> d) & 1;
             sparse_nb = (dense_coord[d] + (dim_code) == dense_grid_dim)
@@ -176,16 +177,18 @@ __global__ void query_backward_forward_kernel(
             float dw = (dim_code) ? (1) : (-1);
             weight *= w;
 
-            weight_grad[0] *= (d == 0) ? 1 : dw;
-            weight_grad[1] *= (d == 1) ? 1 : dw;
-            weight_grad[2] *= (d == 2) ? 1 : dw;
+            weight_grad[0] *= (d == 0) ? dw : w;
+            weight_grad[1] *= (d == 1) ? dw : w;
+            weight_grad[2] *= (d == 2) ? dw : w;
         }
+        // printf("weight: %f, weight_grad: %f %f %f\n", weight, weight_grad[0],
+        //        weight_grad[1], weight_grad[2]);
 
         int sparse_nb_index = sparse_neighbors[sparse_nb];
         if (sparse_nb_index == -1) {
             continue;
         }
-        int dense_nb_index = dense_neighbors[sparse_nb];
+        int dense_nb_index = dense_neighbors[nb];
 
         int base_index = (sparse_nb_index * cells_per_grid + dense_nb_index) *
                          embedding_dims;
@@ -197,7 +200,7 @@ __global__ void query_backward_forward_kernel(
                       normalized_weight * z[i * embedding_dims + k]);
             dot += embeddings[base_index + k] * z[i * embedding_dims + k];
         }
-        dLdoffsets[i] += (dot * weight_grad);
+        dLdoffsets[i] += (dot / sum_weight) * weight_grad;
     }
 };
 

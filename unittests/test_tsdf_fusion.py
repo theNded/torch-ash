@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch.utils.dlpack import from_dlpack, to_dlpack
 
 from ash import UnBoundedSparseDenseGrid, DotDict, HashSet, enumerate_neighbors
@@ -97,8 +98,8 @@ class TSDFFusion:
     def fuse_dataset(self, dataset):
         for i in range(len(dataset)):
             datum = DotDict(dataset[i])
-            if i > 5:
-                break
+            # if i > 2:
+            #     break
             self.fuse_frame(
                 color=torch.from_numpy(datum.color).to(self.device) / 255.0,
                 depth=torch.from_numpy(datum.depth).to(self.device) / self.depth_scale,
@@ -246,12 +247,15 @@ if __name__ == "__main__":
         only_inputs=True,
     )[0]
     print(dsdf_dx.mean())
+    print(dsdf_dx.shape)
+    normals = F.normalize(dsdf_dx, dim=-1)
 
     colors = embeddings[..., 1:4]
 
     mesh = o3d.t.geometry.TriangleMesh()
     mesh.vertex["positions"] = positions.detach().cpu().numpy()
     mesh.vertex["colors"] = colors.detach().cpu().numpy()
+    mesh.vertex["normals"] = normals.detach().cpu().numpy()
     mesh.triangle["indices"] = triangles.cpu().numpy()
-    mesh.compute_vertex_normals()
-    o3d.visualization.draw([mesh.to_legacy(), pcd])
+    # mesh.compute_vertex_normals()
+    o3d.visualization.draw([mesh.to_legacy()])
