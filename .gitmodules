@@ -1,0 +1,6 @@
+[submodule "ext/stdgpu"]
+	path = ext/stdgpu
+	url = https://github.com/theNded/stdgpu.git
+[submodule "ext/DPT"]
+	path = ext/DPT
+	url = https://github.com/isl-org/DPT.git

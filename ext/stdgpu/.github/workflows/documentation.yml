@@ -1,0 +1,46 @@
+name: Documentation OpenMP
+
+on:
+  push:
+    branches:
+      - master
+
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  Doxygen:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install OpenMP
+        shell: bash
+        run: |
+          bash scripts/utils/install_openmp_ubuntu.sh
+
+      - name: Install doxygen dependencies
+        shell: bash
+        run: |
+          bash scripts/utils/install_doxygen_dependencies_ubuntu.sh
+
+      - name: Download dependencies
+        shell: bash
+        run: |
+          bash scripts/utils/download_dependencies.sh
+
+      - name: Download doxygen
+        shell: bash
+        run: |
+          bash scripts/utils/download_doxygen.sh
+
+      - name: Configure project
+        shell: bash
+        run: |
+          bash scripts/ci/configure_openmp_documentation.sh
+
+      - name: Build documentation
+        shell: bash
+        run: |
+          bash scripts/utils/build_documentation.sh
