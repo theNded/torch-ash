@@ -86,7 +86,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             sparse_neighbor_indices_table,
             dense_neighbor_indices_table,
         )
+        ctx.dense_grid_dim = dense_grid_dim
 
+        print('before query_forward')
         y = backend.query_forward(
             embeddings,
             offsets,
@@ -98,31 +100,39 @@ class SparseDenseGridQuery(torch.autograd.Function):
             dense_neighbor_indices_table,
             dense_grid_dim,
         )
+        print('after query_forward')
         return y
 
     @staticmethod
     def backward(ctx, z: torch.Tensor):
+        # z could be all 1 for direct gradient computation
+        # or dLdy for backpropagation
         (
             embeddings,
             offsets,
             sparse_indices,
             dense_indices,
+            dense_coords,
+            masks,
             sparse_neighbor_indices_table,
             dense_neighbor_indices_table,
-            masks,
         ) = ctx.saved_tensors
 
+        print('before backward forward wrapper')
         dLdembedding, dLdoffsets = SparseDenseGridQueryBackward.apply(
             z,
             embeddings,
             offsets,
             sparse_indices,
             dense_indices,
+            dense_coords,
             masks,
             sparse_neighbor_indices_table,
             dense_neighbor_indices_table,
+            ctx.dense_grid_dim,
         )
-        return dLdembedding, dLdoffsets, None, None, None, None, None
+        print('after backward forward wrapper')
+        return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
 
 
 class SparseDenseGridQueryBackward(torch.autograd.Function):
@@ -134,34 +144,44 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         offsets,
         sparse_indices,
         dense_indices,
+        dense_coords,
         masks,
         sparse_neighbor_indices_table,
         dense_neighbor_indices_table,
+        dense_grid_dim,
     ):
         ctx.save_for_backward(
-            embeddings,
-            offsets,
-            sparse_indices,
-            dense_indices,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
-            masks,
-        )
-
-        w1, w2 = backend.sparsedense_grid_query_backward_forward(
             z,
             embeddings,
             offsets,
             sparse_indices,
             dense_indices,
+            dense_coords,
             masks,
             sparse_neighbor_indices_table,
             dense_neighbor_indices_table,
         )
+        ctx.dense_grid_dim = dense_grid_dim
+
+        print('before backward forward')
+        w1, w2 = backend.query_backward_forward(
+            z,
+            embeddings,
+            offsets,
+            sparse_indices,
+            dense_indices,
+            dense_coords,
+            masks,
+            sparse_neighbor_indices_table,
+            dense_neighbor_indices_table,
+            dense_grid_dim,
+        )
+        print('after backward forward')
+        # w1: dLdembedding, w2: dLdoffsets
         return w1, w2
 
     @staticmethod
-    def backward(ctx, v1: torch.Tensor, v2: torch.Tensor):
+    def backward(ctx, grad_w1: torch.Tensor, grad_w2: torch.Tensor):
         (
             embeddings,
             offsets,
@@ -172,6 +192,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             masks,
         ) = ctx.saved_tensors
 
+        print('before backward backward')
         backend.sparse_dense_grid_query_backward_backward(
             v1,
             embeddings,
@@ -182,6 +203,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             sparse_neighbor_indices_table,
             dense_neighbor_indices_table,
         )
+        print('after backward backward')
         return dLdembedding, None, None, None, None, None, None, None
 
 
@@ -375,6 +397,9 @@ class SparseDenseGrid(ASHModule):
 
         sparse_indices, dense_indices, dense_coords, offsets, masks = self.query(x)
 
+        print("x: ", x)
+        print("offsets: ", offsets)
+
         if interpolation == "nearest":
             assert compute_grad_x is False
             return self.embeddings[sparse_indices, dense_indices], masks
@@ -389,7 +414,7 @@ class SparseDenseGrid(ASHModule):
                 masks,
                 self.sparse_neighbor_indices_table,
                 self.dense_neighbor_indices_table,
-                self.dense_grid_dim
+                self.dense_grid_dim,
             )
             return features, masks
         else:

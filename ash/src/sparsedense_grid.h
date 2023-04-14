@@ -28,19 +28,18 @@ at::Tensor query_forward(
 // when a=dl/dy, w/ grad: z1, z2 = g(a, x) = [dl/dy * df/dx, dl/dy * df/dtheta] = [dl/dx, dl/dtheta]
 // (to backprop in the backward pass in a backward call)
 // clang-format on
-at::Tensor backward_forward(
-        const at::Tensor& grad_output_1st,
-        const at::Tensor& grad_output_2nd,
+std::tuple<at::Tensor, at::Tensor> query_backward_forward(
+        const at::Tensor& z,
+        const at::Tensor& embeddings,
+        const at::Tensor& offsets,
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& sparse_indices,
         const at::Tensor& dense_indices,
-        const at::Tensor& interp_ratios,
+        const at::Tensor& dense_coords,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& sparse_coords_table,            // (N, 3)
         const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_coords_table,
         const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
         const int64_t dense_grid_dim);
 
