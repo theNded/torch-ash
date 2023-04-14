@@ -164,6 +164,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         ctx.dense_grid_dim = dense_grid_dim
 
         print('before backward forward')
+        print('offsets:', offsets)
         w1, w2 = backend.query_backward_forward(
             z,
             embeddings,
@@ -178,6 +179,8 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         )
         print('after backward forward')
         # w1: dLdembedding, w2: dLdoffsets
+        print("w1: ", w1.shape, "w2: ", w2.shape)
+        print("w1 mean: ", w1.abs().mean(), "w2 mean: ", w2.abs().mean())
         return w1, w2
 
     @staticmethod
