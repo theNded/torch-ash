@@ -97,6 +97,8 @@ class TSDFFusion:
     def fuse_dataset(self, dataset):
         for i in range(len(dataset)):
             datum = DotDict(dataset[i])
+            if i > 5:
+                break
             self.fuse_frame(
                 color=torch.from_numpy(datum.color).to(self.device) / 255.0,
                 depth=torch.from_numpy(datum.depth).to(self.device) / self.depth_scale,
@@ -232,11 +234,23 @@ if __name__ == "__main__":
     o3d.visualization.draw(pcd)
 
     triangles, positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=False)
+
+    positions.requires_grad_(True)
     embeddings, masks = fuser.grid(positions, interpolation="linear")
+    dsdf_dx = torch.autograd.grad(
+        outputs=embeddings[..., 0],
+        inputs=positions,
+        grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
+        create_graph=True,
+        retain_graph=True,
+        only_inputs=True,
+    )[0]
+    print(dsdf_dx.mean())
+
     colors = embeddings[..., 1:4]
 
     mesh = o3d.t.geometry.TriangleMesh()
-    mesh.vertex["positions"] = positions.cpu().numpy()
+    mesh.vertex["positions"] = positions.detach().cpu().numpy()
     mesh.vertex["colors"] = colors.detach().cpu().numpy()
     mesh.triangle["indices"] = triangles.cpu().numpy()
     mesh.compute_vertex_normals()
