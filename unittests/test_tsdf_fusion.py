@@ -98,8 +98,8 @@ class TSDFFusion:
     def fuse_dataset(self, dataset):
         for i in range(len(dataset)):
             datum = DotDict(dataset[i])
-            # if i > 2:
-            #     break
+            if i > 2:
+                break
             self.fuse_frame(
                 color=torch.from_numpy(datum.color).to(self.device) / 255.0,
                 depth=torch.from_numpy(datum.depth).to(self.device) / self.depth_scale,
@@ -249,6 +249,8 @@ if __name__ == "__main__":
     print(dsdf_dx.mean())
     print(dsdf_dx.shape)
     normals = F.normalize(dsdf_dx, dim=-1)
+
+    normals.sum().backward()
 
     colors = embeddings[..., 1:4]
 

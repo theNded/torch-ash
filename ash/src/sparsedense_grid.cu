@@ -248,6 +248,149 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 }
 
 template <typename scalar_t>
+__global__ void query_backward_backward_kernel(
+        const scalar_t* grad_dLdoffset,
+        const scalar_t* z,
+        const MiniVec<float, 3>* offsets,
+        const int64_t* sparse_indices,
+        const int64_t* dense_indices,
+        const MiniVec<int, 3>* dense_coords,
+        const bool* masks,
+        const MiniVec<int64_t, 8>* sparse_neighbor_indices_table,
+        const MiniVec<int64_t, 8>* dense_neighbor_indices_table,
+        scalar_t* dLdembedding,
+        MiniVec<float, 3>* dLdoffsets,
+        const int64_t dense_grid_dim,
+        const int64_t cells_per_grid,
+        const int64_t embedding_dims,
+        const int64_t len) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len || !masks[i]) {
+        return;
+    }
+
+    int sparse_index = sparse_indices[i];
+    int dense_index = dense_indices[i];
+    MiniVec<int, 3> dense_coord = dense_coords[i];
+    MiniVec<float, 3> offset = offsets[i];
+
+    MiniVec<int64_t, 8> sparse_neighbors =
+            sparse_neighbor_indices_table[sparse_index];
+    MiniVec<int64_t, 8> dense_neighbors =
+            dense_neighbor_indices_table[dense_index];
+
+    float sum_weight = 0.0;
+    for (int nb = 0; nb < 8; ++nb) {
+        int sparse_nb = 0;
+
+        float weight = 1.0;
+        for (int d = 0; d < 3; ++d) {
+            int dim_code = (nb >> d) & 1;
+            sparse_nb = (dense_coord[d] + (dim_code) == dense_grid_dim)
+                                ? (sparse_nb | (1 << d))
+                                : sparse_nb;
+            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            weight *= w;
+        }
+        int sparse_nb_index = sparse_neighbors[sparse_nb];
+        if (sparse_nb_index == -1) {
+            continue;
+        }
+        sum_weight += weight;
+    }
+    if (sum_weight == 0) {
+        return;
+    }
+
+    for (int nb = 0; nb < 8; ++nb) {
+        int sparse_nb = 0;
+
+        float weight = 1.0;
+        MiniVec<float, 3> weight_grad = MiniVec<float, 3>::ones();
+        for (int d = 0; d < 3; ++d) {
+            int dim_code = (nb >> d) & 1;
+            sparse_nb = (dense_coord[d] + (dim_code) == dense_grid_dim)
+                                ? (sparse_nb | (1 << d))
+                                : sparse_nb;
+            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            float dw = (dim_code) ? (1) : (-1);
+
+            weight_grad[0] *= (d == 0) ? dw : w;
+            weight_grad[1] *= (d == 1) ? dw : w;
+            weight_grad[2] *= (d == 2) ? dw : w;
+        }
+        int sparse_nb_index = sparse_neighbors[sparse_nb];
+        if (sparse_nb_index == -1) {
+            continue;
+        }
+        int dense_nb_index = dense_neighbors[nb];
+
+        int base_index = (sparse_nb_index * cells_per_grid + dense_nb_index) *
+                         embedding_dims;
+
+        float dot = 0.0;
+        for (int d = 0; d < 3; ++d) {
+            dot += weight_grad[d] * grad_dLdoffset[i * 3 + d];
+        }
+
+        for (int k = 0; k < embedding_dims; ++k) {
+            atomicAdd(&dLdembedding[base_index + k],
+                      (dot / sum_weight) * z[i * embedding_dims + k]);
+        }
+    }
+};
+
+std::tuple<at::Tensor, at::Tensor> query_backward_backward(
+        const at::Tensor& grad_dLdembedding,
+        const at::Tensor& grad_dLdoffset,
+        const at::Tensor& z,
+        const at::Tensor& embeddings,
+        const at::Tensor& offsets,
+        // queried x via a non-differentiable hash map lookup beforehand
+        const at::Tensor& sparse_indices,
+        const at::Tensor& dense_indices,
+        const at::Tensor& dense_coords,
+        const at::Tensor& masks,
+        // sparse luts
+        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        // dense luts
+        const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
+        const int64_t dense_grid_dim) {
+    const int64_t len = sparse_indices.size(0);
+
+    const int64_t threads = 256;
+    const int64_t blocks = (len + threads - 1) / threads;
+
+    const int64_t embedding_dims = embeddings.size(2);
+    const int64_t cells_per_dense_grid = embeddings.size(1);
+
+    at::Tensor dLdembedding = at::zeros_like(embeddings);
+
+    // ignored for now
+    at::Tensor dLdoffsets = at::zeros_like(offsets);
+
+    // std::cout << "z in backward forward:" << z << std::endl;
+    // std::cout << "embedding in backward forward:" << embeddings << std::endl;
+    query_backward_backward_kernel<float><<<blocks, threads>>>(
+            grad_dLdoffset.data_ptr<float>(), z.data_ptr<float>(),
+            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+            sparse_indices.data_ptr<int64_t>(),
+            dense_indices.data_ptr<int64_t>(),
+            static_cast<MiniVec<int, 3>*>(dense_coords.data_ptr()),
+            masks.data_ptr<bool>(),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    sparse_neighbor_indices_table.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    dense_neighbor_indices_table.data_ptr()),
+            dLdembedding.data_ptr<float>(),
+            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()),
+            dense_grid_dim, cells_per_dense_grid, embedding_dims, len);
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
+
+    return std::make_tuple(dLdembedding, dLdoffsets);
+}
+
+template <typename scalar_t>
 __global__ void isosurface_extraction_kernel(
         const scalar_t* sdfs,
         const scalar_t* weights,
