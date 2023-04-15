@@ -62,19 +62,20 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 // If we do not optimize x (that might be dependent on poses, for instance),
 // we can safely ignore w2 as well.
 // clang-format on
-at::Tensor backward_backward(
-        const at::Tensor& grad_output_1st,
-        const at::Tensor& grad_output_2nd,
+std::tuple<at::Tensor, at::Tensor> query_backward_backward(
+        const at::Tensor& grad_dLdembedding,
+        const at::Tensor& grad_dLdoffset,
+        const at::Tensor& z,
+        const at::Tensor& embeddings,
+        const at::Tensor& offsets,
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& sparse_indices,
         const at::Tensor& dense_indices,
-        const at::Tensor& interp_ratios,
+        const at::Tensor& dense_coords,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& sparse_coords_table,            // (N, 3)
         const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_coords_table,
         const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
         const int64_t dense_grid_dim);
 

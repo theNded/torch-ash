@@ -1,11 +1,7 @@
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
 
-// #include "grid_query.h"
-// #include "grid_util.h"
 #include "hashmap.h"
-// #include "render.h"
-// #include "sampler.h"
 #include "sparsedense_grid.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -28,6 +24,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("query_forward", &query_forward, "Query forward");
     m.def("query_backward_forward", &query_backward_forward,
           "Query backward forward");
+    m.def("query_backward_backward", &query_backward_backward,
+          "Query backward backward");
     m.def("isosurface_extraction", &isosurface_extraction,
           "Isosurface extraction");
     m.def("marching_cubes", &marching_cubes, "Marching cubes");
