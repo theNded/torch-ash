@@ -6,16 +6,16 @@
 
 template <typename scalar_t>
 __global__ void query_forward_kernel(
-        const scalar_t* embeddings,
-        const MiniVec<float, 3>* offsets,
-        const int64_t* grid_indices,
-        const int64_t* cell_indices,
-        const MiniVec<int, 3>* cell_coords,
-        const bool* masks,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        scalar_t* output,
+        const scalar_t* __restrict__ embeddings,
+        const MiniVec<float, 3>* __restrict__ offsets,
+        const int64_t* __restrict__ grid_indices,
+        const int64_t* __restrict__ cell_indices,
+        const MiniVec<int, 3>* __restrict__ cell_coords,
+        const bool* __restrict__ masks,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        scalar_t* __restrict__ output,
         const int64_t grid_dim,
         const int64_t cells_per_grid,
         const int64_t embedding_dims,
@@ -27,12 +27,15 @@ __global__ void query_forward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    MiniVec<int, 3> cell_coord = cell_coords[i];
-    MiniVec<float, 3> offset = offsets[i];
+    const MiniVec<int, 3>& cell_coord = cell_coords[i];
+    const MiniVec<float, 3>& offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     // TODO: dispatch or better serialization
     MiniVec<scalar_t, 16> sum_output = MiniVec<scalar_t, 16>::zeros();
@@ -108,18 +111,18 @@ at::Tensor query_forward(
 
 template <typename scalar_t>
 __global__ void query_backward_forward_kernel(
-        const scalar_t* z,
-        const scalar_t* embeddings,
-        const MiniVec<float, 3>* offsets,
-        const int64_t* grid_indices,
-        const int64_t* cell_indices,
-        const MiniVec<int, 3>* cell_coords,
-        const bool* masks,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        scalar_t* dLdembedding,
-        MiniVec<float, 3>* dLdoffsets,
+        const scalar_t* __restrict__ z,
+        const scalar_t* __restrict__ embeddings,
+        const MiniVec<float, 3>* __restrict__ offsets,
+        const int64_t* __restrict__ grid_indices,
+        const int64_t* __restrict__ cell_indices,
+        const MiniVec<int, 3>* __restrict__ cell_coords,
+        const bool* __restrict__ masks,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        scalar_t* __restrict__ dLdembedding,
+        MiniVec<float, 3>* __restrict__ dLdoffsets,
         const int64_t grid_dim,
         const int64_t cells_per_grid,
         const int64_t embedding_dims,
@@ -131,12 +134,15 @@ __global__ void query_backward_forward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    MiniVec<int, 3> cell_coord = cell_coords[i];
-    MiniVec<float, 3> offset = offsets[i];
+    const MiniVec<int, 3>& cell_coord = cell_coords[i];
+    const MiniVec<float, 3>& offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     float sum_weight = 0.0;
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
@@ -240,18 +246,18 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 
 template <typename scalar_t>
 __global__ void query_backward_backward_kernel(
-        const scalar_t* grad_dLdoffset,
-        const scalar_t* z,
-        const MiniVec<float, 3>* offsets,
-        const int64_t* grid_indices,
-        const int64_t* cell_indices,
-        const MiniVec<int, 3>* cell_coords,
-        const bool* masks,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        scalar_t* dLdembedding,
-        MiniVec<float, 3>* dLdoffsets,
+        const scalar_t* __restrict__ grad_dLdoffset,
+        const scalar_t* __restrict__ z,
+        const MiniVec<float, 3>* __restrict__ offsets,
+        const int64_t* __restrict__ grid_indices,
+        const int64_t* __restrict__ cell_indices,
+        const MiniVec<int, 3>* __restrict__ cell_coords,
+        const bool* __restrict__ masks,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        scalar_t* __restrict__ dLdembedding,
+        MiniVec<float, 3>* __restrict__ dLdoffsets,
         const int64_t grid_dim,
         const int64_t cells_per_grid,
         const int64_t embedding_dims,
@@ -263,12 +269,15 @@ __global__ void query_backward_backward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    MiniVec<int, 3> cell_coord = cell_coords[i];
-    MiniVec<float, 3> offset = offsets[i];
+    const MiniVec<int, 3>& cell_coord = cell_coords[i];
+    const MiniVec<float, 3>& offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     float sum_weight = 0.0;
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
@@ -378,16 +387,16 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
 
 template <typename scalar_t>
 __global__ void isosurface_extraction_kernel(
-        const scalar_t* sdfs,
-        const scalar_t* weights,
-        const int64_t* grid_indices,
-        const MiniVec<int, 3>* grid_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int, 3>* cell_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        int* output_counter,
-        MiniVec<float, 3>* output_positions,
+        const scalar_t* __restrict__ sdfs,
+        const scalar_t* __restrict__ weights,
+        const int64_t* __restrict__ grid_indices,
+        const MiniVec<int, 3>* __restrict__ grid_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int, 3>* __restrict__ cell_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        int* __restrict__ output_counter,
+        MiniVec<float, 3>* __restrict__ output_positions,
         const float iso_value,
         const float weight_thr,
         const int grid_dim,
@@ -405,17 +414,20 @@ __global__ void isosurface_extraction_kernel(
     int dense_i = i % num_cells_per_grid;
 
     int grid_idx = grid_indices[sparse_i];
-    MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int, 3>& sparse_coord = grid_coords_table[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
     if (grid_idx != neighbor_grid2grid[0] or grid_idx == -1) {
         printf("extract isosurfaces: should never reach here!\n");
         return;
     }
 
     int cell_idx = dense_i;
-    MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int, 3>& cell_coord = cell_coords_table[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
@@ -522,17 +534,17 @@ at::Tensor isosurface_extraction(
 
 template <typename scalar_t>
 __global__ void marching_cubes_table_idx_kernel(
-        const scalar_t* sdfs,
-        const scalar_t* weights,
-        const int64_t* grid_indices,
-        const MiniVec<int, 3>* grid_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int, 3>* cell_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        int* table_indices,
-        MiniVec<int, 3>*
-                edge_vertex_indices,  // 3 per cell in the sparse-dense grid
+        const scalar_t* __restrict__ sdfs,
+        const scalar_t* __restrict__ weights,
+        const int64_t* __restrict__ grid_indices,
+        const MiniVec<int, 3>* __restrict__ grid_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int, 3>* __restrict__ cell_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        int* __restrict__ table_indices,
+        MiniVec<int, 3>* __restrict__ edge_vertex_indices,  // 3 per cell in the
+                                                            // sparse-dense grid
         const float iso_value,
         const float weight_thr,
         const int grid_dim,
@@ -545,13 +557,16 @@ __global__ void marching_cubes_table_idx_kernel(
     int dense_i = i % num_cells_per_grid;
 
     int grid_idx = grid_indices[sparse_i];
-    MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int, 3>& sparse_coord = grid_coords_table[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
-    MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int, 3>& cell_coord = cell_coords_table[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
@@ -618,18 +633,18 @@ __global__ void marching_cubes_table_idx_kernel(
 
 template <typename scalar_t>
 __global__ void marching_cubes_vertex_kernel(
-        const scalar_t* sdfs,
-        const scalar_t* weights,
-        const int64_t* grid_indices,
-        const MiniVec<int, 3>* grid_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int, 3>* cell_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        MiniVec<int, 3>*
-                edge_vertex_indices,  // 3 per cell in the sparse-dense grid
-        int* vertex_counter,
-        MiniVec<float, 3>* vertex_positions,
+        const scalar_t* __restrict__ sdfs,
+        const scalar_t* __restrict__ weights,
+        const int64_t* __restrict__ grid_indices,
+        const MiniVec<int, 3>* __restrict__ grid_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int, 3>* __restrict__ cell_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        MiniVec<int, 3>* __restrict__ edge_vertex_indices,  // 3 per cell in the
+                                                            // sparse-dense grid
+        int* __restrict__ vertex_counter,
+        MiniVec<float, 3>* __restrict__ vertex_positions,
         const float iso_value,
         const float weight_thr,
         const int grid_dim,
@@ -642,13 +657,16 @@ __global__ void marching_cubes_vertex_kernel(
     int dense_i = i % num_cells_per_grid;
 
     int grid_idx = grid_indices[sparse_i];
-    MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int, 3>& sparse_coord = grid_coords_table[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
-    MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int, 3>& cell_coord = cell_coords_table[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
@@ -689,19 +707,18 @@ __global__ void marching_cubes_vertex_kernel(
 
 template <typename scalar_t>
 __global__ void marching_cubes_triangle_kernel(
-        scalar_t* sdfs,
-        const scalar_t* weights,
-        const int64_t* grid_indices,
-        const MiniVec<int, 3>* grid_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
-        const MiniVec<int, 3>* cell_coords_table,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
-        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
-        const int* table_indices,
-        const MiniVec<int, 3>*
-                edge_vertex_indices,  // 3 per cell in the sparse-dense grid
-        int* triangle_counter,
-        MiniVec<int, 3>* triangle_indices,
+        scalar_t* __restrict__ sdfs,
+        const scalar_t* __restrict__ weights,
+        const int64_t* __restrict__ grid_indices,
+        const MiniVec<int, 3>* __restrict__ grid_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
+        const MiniVec<int, 3>* __restrict__ cell_coords_table,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        const int* __restrict__ table_indices,
+        const MiniVec<int, 3>* __restrict__ edge_vertex_indices,
+        int* __restrict__ triangle_counter,
+        MiniVec<int, 3>* __restrict__ triangle_indices,
         const float iso_value,
         const float weight_thr,
         const int grid_dim,
@@ -714,13 +731,16 @@ __global__ void marching_cubes_triangle_kernel(
     int dense_i = i % num_cells_per_grid;
 
     int grid_idx = grid_indices[sparse_i];
-    MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    const MiniVec<int, 3>& sparse_coord = grid_coords_table[grid_idx];
+    const MiniVec<int64_t, 8>& neighbor_grid2grid =
+            neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
-    MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
+    const MiniVec<int, 3>& cell_coord = cell_coords_table[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2cell =
+            neighbor_table_cell2cell[cell_idx];
+    const MiniVec<int64_t, 8>& neighbor_cell2grid =
+            neighbor_table_cell2grid[cell_idx];
 
     int table_idx = table_indices[grid_idx * num_cells_per_grid + cell_idx];
     if (table_idx == 0) {
