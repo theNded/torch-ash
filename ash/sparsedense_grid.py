@@ -84,6 +84,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
         masks: torch.Tensor,
         neighbor_table_grid2grid: torch.Tensor,
         neighbor_table_cell2cell: torch.Tensor,
+        neighbor_table_cell2grid: torch.Tensor,
         grid_dim: int,
     ) -> torch.Tensor:
         ctx.save_for_backward(
@@ -95,6 +96,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
         )
         ctx.grid_dim = grid_dim
 
@@ -108,6 +110,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
             grid_dim,
         )
         print("after query_forward")
@@ -126,6 +129,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
         print("before backward forward wrapper")
@@ -139,10 +143,11 @@ class SparseDenseGridQuery(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
             ctx.grid_dim,
         )
         print("after backward forward wrapper")
-        return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
+        return dLdembedding, dLdoffsets, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGridQueryBackward(torch.autograd.Function):
@@ -158,6 +163,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         masks,
         neighbor_table_grid2grid,
         neighbor_table_cell2cell,
+        neighbor_table_cell2grid,
         grid_dim,
     ):
         ctx.save_for_backward(
@@ -170,11 +176,10 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
         )
         ctx.grid_dim = grid_dim
 
-        print("before backward forward")
-        print("offsets:", offsets)
         w1, w2 = backend.query_backward_forward(
             z,
             embeddings,
@@ -185,6 +190,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
             grid_dim,
         )
         print("after backward forward")
@@ -205,6 +211,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
@@ -225,10 +232,11 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             masks,
             neighbor_table_grid2grid,
             neighbor_table_cell2cell,
+            neighbor_table_cell2grid,
             ctx.grid_dim,
         )
         print("after backward backward")
-        return dLdembedding, None, None, None, None, None, None, None, None, None
+        return dLdembedding, None, None, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGrid(ASHModule):
@@ -304,9 +312,9 @@ class SparseDenseGrid(ASHModule):
 
         dense_neighbor_coords = (
             self.cell_coords.view(-1, 1, in_dim) + self.neighbor_coord_offsets
-        ).view(-1, 3) % grid_dim
+        ).view(-1, 3)
 
-        cell_boundary_mask = (dense_neighbor_coords + 1 == grid_dim).long()
+        cell_boundary_mask = (dense_neighbor_coords == grid_dim).long()
         self.neighbor_table_cell2grid = torch.zeros(
             self.num_cells_per_grid * 2**in_dim, device=self.device, dtype=torch.long
         )
@@ -320,7 +328,7 @@ class SparseDenseGrid(ASHModule):
         print(self.neighbor_table_cell2grid)
 
         self.neighbor_table_cell2cell = self._linearize_cell_coords(
-            dense_neighbor_coords
+            dense_neighbor_coords % grid_dim
         ).view(self.num_cells_per_grid, -1)
 
         assert self.neighbor_table_cell2cell.shape == (
@@ -452,6 +460,7 @@ class SparseDenseGrid(ASHModule):
                 masks,
                 self.neighbor_table_grid2grid,
                 self.neighbor_table_cell2cell,
+                self.neighbor_table_cell2grid,
                 self.grid_dim,
             )
             return features, masks
@@ -628,6 +637,7 @@ class SparseDenseGrid(ASHModule):
                 self.neighbor_table_grid2grid,
                 self.cell_coords,
                 self.neighbor_table_cell2cell,
+                self.neighbor_table_cell2grid,
                 self.grid_dim,
                 0.0,
                 1.0,
@@ -643,6 +653,7 @@ class SparseDenseGrid(ASHModule):
                 self.neighbor_table_grid2grid,
                 self.cell_coords,
                 self.neighbor_table_cell2cell,
+                self.neighbor_table_cell2grid,
                 self.grid_dim,
                 0.0,
                 1.0,

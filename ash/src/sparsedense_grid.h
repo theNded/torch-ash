@@ -15,6 +15,7 @@ at::Tensor query_forward(
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,
+        const at::Tensor& neighbor_table_cell2grid,
         const int64_t grid_dim);
 
 // clang-format off
@@ -41,6 +42,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim);
 
 // clang-format off
@@ -77,6 +79,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim);
 
 at::Tensor isosurface_extraction(
@@ -90,6 +93,7 @@ at::Tensor isosurface_extraction(
         // dense luts
         const at::Tensor& cell_coords_table,
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);
@@ -105,6 +109,7 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
         // dense luts
         const at::Tensor& cell_coords_table,
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);

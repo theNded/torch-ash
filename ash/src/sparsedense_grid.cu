@@ -14,6 +14,7 @@ __global__ void query_forward_kernel(
         const bool* masks,
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         scalar_t* output,
         const int64_t grid_dim,
         const int64_t cells_per_grid,
@@ -29,34 +30,29 @@ __global__ void query_forward_kernel(
     MiniVec<int, 3> cell_coord = cell_coords[i];
     MiniVec<float, 3> offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     // TODO: dispatch or better serialization
     MiniVec<scalar_t, 16> sum_output = MiniVec<scalar_t, 16>::zeros();
     float sum_weight = 0.0;
-    for (int nb = 0; nb < 8; ++nb) {
-        int grid_nb = 0;
-
-        float weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (nb >> d) & 1;
-            grid_nb = (cell_coord[d] + (dim_code) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
-            weight *= (dim_code) ? (offset[d]) : (1 - offset[d]);
-        }
-
+    for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
+        int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
             continue;
         }
-        int cell_nb_idx = neighbor_cell2cell[nb];
 
-        int base_idx = (grid_nb_idx * cells_per_grid + cell_nb_idx) *
-                         embedding_dims;
+        float weight = 1.0;
+        for (int d = 0; d < 3; ++d) {
+            int dim_code = (cell_nb >> d) & 1;
+            weight *= (dim_code) ? (offset[d]) : (1 - offset[d]);
+        }
+
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
+        int base_idx =
+                (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
         for (int k = 0; k < embedding_dims; ++k) {
             sum_output[k] += weight * embeddings[base_idx + k];
         }
@@ -78,6 +74,7 @@ at::Tensor query_forward(
         const at::Tensor& masks,
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
+        const at::Tensor& neighbor_table_cell2grid,
         const int64_t grid_dim) {
     // TODO: wise block-thread unrolling
     const int64_t len = grid_indices.size(0);
@@ -93,14 +90,15 @@ at::Tensor query_forward(
     query_forward_kernel<float><<<blocks, threads>>>(
             embeddings.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(),
-            cell_indices.data_ptr<int64_t>(),
+            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
             static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             output.data_ptr<float>(), grid_dim, num_cells_per_grid,
             embedding_dims, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
@@ -119,6 +117,7 @@ __global__ void query_backward_forward_kernel(
         const bool* masks,
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         scalar_t* dLdembedding,
         MiniVec<float, 3>* dLdoffsets,
         const int64_t grid_dim,
@@ -135,27 +134,23 @@ __global__ void query_backward_forward_kernel(
     MiniVec<int, 3> cell_coord = cell_coords[i];
     MiniVec<float, 3> offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     float sum_weight = 0.0;
-    for (int nb = 0; nb < 8; ++nb) {
-        int grid_nb = 0;
-
-        float weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (nb >> d) & 1;
-            grid_nb = (cell_coord[d] + (dim_code) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
-            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            weight *= w;
-        }
+    for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
+        int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
             continue;
+        }
+
+        float weight = 1.0;
+        for (int d = 0; d < 3; ++d) {
+            int dim_code = (cell_nb >> d) & 1;
+            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            weight *= w;
         }
         sum_weight += weight;
     }
@@ -163,16 +158,17 @@ __global__ void query_backward_forward_kernel(
         return;
     }
 
-    for (int nb = 0; nb < 8; ++nb) {
-        int grid_nb = 0;
+    for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
+        int grid_nb = neighbor_cell2grid[cell_nb];
+        int grid_nb_idx = neighbor_grid2grid[grid_nb];
+        if (grid_nb_idx == -1) {
+            continue;
+        }
 
         float weight = 1.0;
         MiniVec<float, 3> weight_grad = MiniVec<float, 3>::ones();
         for (int d = 0; d < 3; ++d) {
-            int dim_code = (nb >> d) & 1;
-            grid_nb = (cell_coord[d] + (dim_code) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
+            int dim_code = (cell_nb >> d) & 1;
             float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
             float dw = (dim_code) ? (1) : (-1);
             weight *= w;
@@ -181,17 +177,10 @@ __global__ void query_backward_forward_kernel(
             weight_grad[1] *= (d == 1) ? dw : w;
             weight_grad[2] *= (d == 2) ? dw : w;
         }
-        // printf("weight: %f, weight_grad: %f %f %f\n", weight, weight_grad[0],
-        //        weight_grad[1], weight_grad[2]);
 
-        int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
-        int cell_nb_idx = neighbor_cell2cell[nb];
-
-        int base_idx = (grid_nb_idx * cells_per_grid + cell_nb_idx) *
-                         embedding_dims;
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
+        int base_idx =
+                (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
 
         float dot = 0.0;
         float normalized_weight = weight / sum_weight;
@@ -214,6 +203,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& masks,
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
+        const at::Tensor& neighbor_table_cell2grid,
         const int64_t grid_dim) {
     const int64_t len = grid_indices.size(0);
 
@@ -231,17 +221,18 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
     query_backward_forward_kernel<float><<<blocks, threads>>>(
             z.data_ptr<float>(), embeddings.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(),
-            cell_indices.data_ptr<int64_t>(),
+            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
             static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             dLdembedding.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()),
-            grid_dim, num_cells_per_grid, embedding_dims, len);
+            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()), grid_dim,
+            num_cells_per_grid, embedding_dims, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return std::make_tuple(dLdembedding, dLdoffsets);
@@ -258,6 +249,7 @@ __global__ void query_backward_backward_kernel(
         const bool* masks,
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         scalar_t* dLdembedding,
         MiniVec<float, 3>* dLdoffsets,
         const int64_t grid_dim,
@@ -274,27 +266,23 @@ __global__ void query_backward_backward_kernel(
     MiniVec<int, 3> cell_coord = cell_coords[i];
     MiniVec<float, 3> offset = offsets[i];
 
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     float sum_weight = 0.0;
-    for (int nb = 0; nb < 8; ++nb) {
-        int grid_nb = 0;
-
-        float weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (nb >> d) & 1;
-            grid_nb = (cell_coord[d] + (dim_code) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
-            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            weight *= w;
-        }
+    for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
+        int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
             continue;
+        }
+
+        float weight = 1.0;
+        for (int d = 0; d < 3; ++d) {
+            int dim_code = (cell_nb >> d) & 1;
+            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            weight *= w;
         }
         sum_weight += weight;
     }
@@ -302,16 +290,17 @@ __global__ void query_backward_backward_kernel(
         return;
     }
 
-    for (int nb = 0; nb < 8; ++nb) {
-        int grid_nb = 0;
+    for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
+        int grid_nb = neighbor_cell2grid[cell_nb];
+        int grid_nb_idx = neighbor_grid2grid[grid_nb];
+        if (grid_nb_idx == -1) {
+            continue;
+        }
 
         float weight = 1.0;
         MiniVec<float, 3> weight_grad = MiniVec<float, 3>::ones();
         for (int d = 0; d < 3; ++d) {
-            int dim_code = (nb >> d) & 1;
-            grid_nb = (cell_coord[d] + (dim_code) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
+            int dim_code = (cell_nb >> d) & 1;
             float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
             float dw = (dim_code) ? (1) : (-1);
 
@@ -319,14 +308,9 @@ __global__ void query_backward_backward_kernel(
             weight_grad[1] *= (d == 1) ? dw : w;
             weight_grad[2] *= (d == 2) ? dw : w;
         }
-        int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
-        int cell_nb_idx = neighbor_cell2cell[nb];
-
-        int base_idx = (grid_nb_idx * cells_per_grid + cell_nb_idx) *
-                         embedding_dims;
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
+        int base_idx =
+                (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
 
         float dot = 0.0;
         for (int d = 0; d < 3; ++d) {
@@ -355,6 +339,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim) {
     const int64_t len = grid_indices.size(0);
 
@@ -374,17 +359,18 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
     query_backward_backward_kernel<float><<<blocks, threads>>>(
             grad_dLdoffset.data_ptr<float>(), z.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(),
-            cell_indices.data_ptr<int64_t>(),
+            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
             static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             dLdembedding.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()),
-            grid_dim, num_cells_per_grid, embedding_dims, len);
+            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()), grid_dim,
+            num_cells_per_grid, embedding_dims, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return std::make_tuple(dLdembedding, dLdoffsets);
@@ -399,6 +385,7 @@ __global__ void isosurface_extraction_kernel(
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int, 3>* cell_coords_table,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         int* output_counter,
         MiniVec<float, 3>* output_positions,
         const float iso_value,
@@ -419,8 +406,7 @@ __global__ void isosurface_extraction_kernel(
 
     int grid_idx = grid_indices[sparse_i];
     MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
     if (grid_idx != neighbor_grid2grid[0] or grid_idx == -1) {
         printf("extract isosurfaces: should never reach here!\n");
         return;
@@ -428,12 +414,11 @@ __global__ void isosurface_extraction_kernel(
 
     int cell_idx = dense_i;
     MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
-    scalar_t self_weight =
-            weights[grid_idx * num_cells_per_grid + cell_idx];
+    scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_isodiff = self_sdf - iso_value;
 
     if (self_weight < weight_thr) {
@@ -445,19 +430,18 @@ __global__ void isosurface_extraction_kernel(
         // Look for 3 neighbors in each dimension
         offset[d] = 1;
 
-        int grid_nb = (cell_coord[d] + 1 == grid_dim) ? (1 << d) : 0;
-        int dense_nb = 1 << d;
+        int cell_nb = 1 << d;
+        int grid_nb = neighbor_cell2grid[cell_nb];
 
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        int cell_nb_idx = neighbor_cell2cell[dense_nb];
-
         if (grid_nb_idx == -1) {
             return;
         }
-        scalar_t nb_sdf =
-                sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
-        scalar_t nb_weight = weights[grid_nb_idx * num_cells_per_grid +
-                                     cell_nb_idx];
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
+
+        scalar_t nb_sdf = sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
+        scalar_t nb_weight =
+                weights[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
         scalar_t nb_isodiff = nb_sdf - iso_value;
 
         if (self_isodiff * nb_isodiff < 0 && nb_weight >= weight_thr) {
@@ -485,6 +469,7 @@ at::Tensor isosurface_extraction(
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& cell_coords_table,
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr) {
@@ -507,6 +492,8 @@ at::Tensor isosurface_extraction(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             output_counter.data_ptr<int>(), nullptr, iso_value, weight_thr,
             grid_dim, num_cells_per_grid, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
@@ -523,6 +510,8 @@ at::Tensor isosurface_extraction(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             output_counter.data_ptr<int>(),
             static_cast<MiniVec<float, 3>*>(output_positions.data_ptr()),
             iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
@@ -540,6 +529,7 @@ __global__ void marching_cubes_table_idx_kernel(
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int, 3>* cell_coords_table,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         int* table_indices,
         MiniVec<int, 3>*
                 edge_vertex_indices,  // 3 per cell in the sparse-dense grid
@@ -556,17 +546,15 @@ __global__ void marching_cubes_table_idx_kernel(
 
     int grid_idx = grid_indices[sparse_i];
     MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
     MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
-    scalar_t self_weight =
-            weights[grid_idx * num_cells_per_grid + cell_idx];
+    scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_isodiff = self_sdf - iso_value;
 
     if (self_weight < weight_thr) {
@@ -575,27 +563,18 @@ __global__ void marching_cubes_table_idx_kernel(
 
     int table_idx = 0;
     for (int corner = 0; corner < 8; ++corner) {
-        int grid_nb = 0;
-
-        int dense_nb = nb_mc_vtx_map[corner];
-        for (int d = 0; d < 3; ++d) {
-            grid_nb =
-                    (cell_coord[d] + ((dense_nb >> d) & 1) == grid_dim)
-                            ? (grid_nb | (1 << d))
-                            : grid_nb;
-        }
+        int cell_nb = nb_mc_vtx_map[corner];
+        int grid_nb = neighbor_cell2grid[cell_nb];
 
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        int cell_nb_idx = neighbor_cell2cell[dense_nb];
-
         if (grid_nb_idx == -1) {
             return;
         }
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
 
-        scalar_t nb_sdf =
-                sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
-        scalar_t nb_weight = weights[grid_nb_idx * num_cells_per_grid +
-                                     cell_nb_idx];
+        scalar_t nb_sdf = sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
+        scalar_t nb_weight =
+                weights[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
         scalar_t nb_isodiff = nb_sdf - iso_value;
 
         if (nb_weight < weight_thr) {
@@ -609,8 +588,7 @@ __global__ void marching_cubes_table_idx_kernel(
     if (table_idx == 0 || table_idx == 255) {
         return;
     }
-    table_indices[grid_idx * num_cells_per_grid + cell_idx] =
-            table_idx;
+    table_indices[grid_idx * num_cells_per_grid + cell_idx] = table_idx;
 
     // 1st 12 bits encodes edge-isosurface intersection
     int edges_encoding = edge_table[table_idx];
@@ -623,28 +601,18 @@ __global__ void marching_cubes_table_idx_kernel(
         // First decide the cell in charge of this edge (12 edges for a cell,
         // could be managed by a neighbor)
         // and the edge direction
-        int nb = nb_mc_vtx_map[edge_to_vert[edge][0]];  // [0, 8)
-        int edge_dir = edge_shifts[edge][3];            // [0, 1, 2]
+        int cell_nb = nb_mc_vtx_map[edge_to_vert[edge][0]];  // [0, 8)
+        int edge_dir = edge_shifts[edge][3];                 // [0, 1, 2]
 
-        int grid_nb = 0;
-        for (int d = 0; d < 3; ++d) {
-            grid_nb = (cell_coord[d] + ((nb >> d) & 1) == grid_dim)
-                                ? (grid_nb | (1 << d))
-                                : grid_nb;
-        }
-        int dense_nb = nb;
+        int grid_nb = neighbor_cell2grid[cell_nb];
 
         // must be valid from the table decision
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        int cell_nb_idx = neighbor_cell2cell[dense_nb];
-        if (grid_nb_idx == -1) {
-            printf("Should never reach here!\n");
-            return;
-        }
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
 
         // Placeholder for the vertex idx
-        edge_vertex_indices[grid_nb_idx * num_cells_per_grid +
-                            cell_nb_idx][edge_dir] = -1;
+        edge_vertex_indices[grid_nb_idx * num_cells_per_grid + cell_nb_idx]
+                           [edge_dir] = -1;
     }
 }
 
@@ -657,6 +625,7 @@ __global__ void marching_cubes_vertex_kernel(
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int, 3>* cell_coords_table,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         MiniVec<int, 3>*
                 edge_vertex_indices,  // 3 per cell in the sparse-dense grid
         int* vertex_counter,
@@ -674,17 +643,15 @@ __global__ void marching_cubes_vertex_kernel(
 
     int grid_idx = grid_indices[sparse_i];
     MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
     MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
     scalar_t self_sdf = sdfs[grid_idx * num_cells_per_grid + cell_idx];
-    scalar_t self_weight =
-            weights[grid_idx * num_cells_per_grid + cell_idx];
+    scalar_t self_weight = weights[grid_idx * num_cells_per_grid + cell_idx];
     scalar_t self_isodiff = self_sdf - iso_value;
 
     if (self_weight < weight_thr) {
@@ -693,35 +660,28 @@ __global__ void marching_cubes_vertex_kernel(
 
     MiniVec<float, 3> offset = MiniVec<float, 3>::zeros();
     for (int d = 0; d < 3; ++d) {
-        if (edge_vertex_indices[grid_idx * num_cells_per_grid +
-                                cell_idx][d] != -1) {
+        if (edge_vertex_indices[grid_idx * num_cells_per_grid + cell_idx][d] !=
+            -1) {
             continue;
         }
         offset[d] = 1;
 
-        int grid_nb = (cell_coord[d] + 1 == grid_dim) ? (1 << d) : 0;
-        int dense_nb = 1 << d;
-
+        int cell_nb = 1 << d;
+        int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        int cell_nb_idx = neighbor_cell2cell[dense_nb];
+        int cell_nb_idx = neighbor_cell2cell[cell_nb];
 
-        if (grid_nb_idx == -1) {
-            printf("should never reach here!\n");
-            return;
-        }
-        scalar_t nb_sdf =
-                sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
+        scalar_t nb_sdf = sdfs[grid_nb_idx * num_cells_per_grid + cell_nb_idx];
         scalar_t nb_isodiff = nb_sdf - iso_value;
 
         int output_idx = atomicAdd(vertex_counter, 1);
 
         float ratio = self_isodiff / (self_isodiff - nb_isodiff);
-        MiniVec<int, 3> self_position =
-                sparse_coord * grid_dim + cell_coord;
+        MiniVec<int, 3> self_position = sparse_coord * grid_dim + cell_coord;
         MiniVec<float, 3> surface_position =
                 self_position.template cast<float>() + ratio * offset;
-        edge_vertex_indices[grid_idx * num_cells_per_grid + cell_idx]
-                           [d] = output_idx;
+        edge_vertex_indices[grid_idx * num_cells_per_grid + cell_idx][d] =
+                output_idx;
         offset[d] = 0;
         vertex_positions[output_idx] = surface_position;
     }
@@ -736,6 +696,7 @@ __global__ void marching_cubes_triangle_kernel(
         const MiniVec<int64_t, 8>* neighbor_table_grid2grid,
         const MiniVec<int, 3>* cell_coords_table,
         const MiniVec<int64_t, 8>* neighbor_table_cell2cell,
+        const MiniVec<int64_t, 8>* neighbor_table_cell2grid,
         const int* table_indices,
         const MiniVec<int, 3>*
                 edge_vertex_indices,  // 3 per cell in the sparse-dense grid
@@ -754,16 +715,14 @@ __global__ void marching_cubes_triangle_kernel(
 
     int grid_idx = grid_indices[sparse_i];
     MiniVec<int, 3> sparse_coord = grid_coords_table[grid_idx];
-    MiniVec<int64_t, 8> neighbor_grid2grid =
-            neighbor_table_grid2grid[grid_idx];
+    MiniVec<int64_t, 8> neighbor_grid2grid = neighbor_table_grid2grid[grid_idx];
 
     int cell_idx = dense_i;
     MiniVec<int, 3> cell_coord = cell_coords_table[cell_idx];
-    MiniVec<int64_t, 8> neighbor_cell2cell =
-            neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2cell = neighbor_table_cell2cell[cell_idx];
+    MiniVec<int64_t, 8> neighbor_cell2grid = neighbor_table_cell2grid[cell_idx];
 
-    int table_idx =
-            table_indices[grid_idx * num_cells_per_grid + cell_idx];
+    int table_idx = table_indices[grid_idx * num_cells_per_grid + cell_idx];
     if (table_idx == 0) {
         return;
     }
@@ -778,23 +737,13 @@ __global__ void marching_cubes_triangle_kernel(
         for (int vertex = 0; vertex < 3; ++vertex) {
             int edge = tri_table[table_idx][tri + vertex];
 
-            // extract the vertex idx from the edge
-            int grid_nb = 0;
-            int dense_nb = nb_mc_vtx_map[edge_to_vert[edge][0]];
-            int edge_dir = edge_shifts[edge][3];
-            for (int d = 0; d < 3; ++d) {
-                grid_nb = (cell_coord[d] + ((dense_nb >> d) & 1) ==
-                             grid_dim)
-                                    ? (grid_nb | (1 << d))
-                                    : grid_nb;
-            }
-            int grid_nb_idx = neighbor_grid2grid[grid_nb];
-            int cell_nb_idx = neighbor_cell2cell[dense_nb];
+            int cell_nb = nb_mc_vtx_map[edge_to_vert[edge][0]];
 
-            if (grid_nb_idx == -1) {
-                printf("triangle extraction: should never reach here\n");
-                return;
-            }
+            // extract the vertex idx from the edge
+            int grid_nb = neighbor_cell2grid[cell_nb];
+            int edge_dir = edge_shifts[edge][3];
+            int grid_nb_idx = neighbor_grid2grid[grid_nb];
+            int cell_nb_idx = neighbor_cell2cell[cell_nb];
 
             int vertex_idx =
                     edge_vertex_indices[grid_nb_idx * num_cells_per_grid +
@@ -809,12 +758,13 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
         const at::Tensor& sdfs,     // (num_embeddings, dense_res^3, 1)
         const at::Tensor& weights,  // (num_embeddings, dense_res^3, 1)
 
-        const at::Tensor& grid_indices,                 // (N, 1)
-        const at::Tensor& grid_coords_table,            // (N, 3)
+        const at::Tensor& grid_indices,              // (N, 1)
+        const at::Tensor& grid_coords_table,         // (N, 3)
         const at::Tensor& neighbor_table_grid2grid,  // (N, 8) [-1 for
-                                                          // invalid neighbors]
-        const at::Tensor& cell_coords_table,             // (dense_res^3, 1)
-        const at::Tensor& neighbor_table_cell2cell,   // (dense_res^3, 8)
+                                                     // invalid neighbors]
+        const at::Tensor& cell_coords_table,         // (dense_res^3, 1)
+        const at::Tensor& neighbor_table_cell2cell,  // (dense_res^3, 8)
+        const at::Tensor& neighbor_table_cell2grid,  // (dense_res^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr) {
@@ -852,6 +802,8 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             table_indices.data_ptr<int>(),
             static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
             iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
@@ -875,6 +827,8 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
             vertex_counter.data_ptr<int>(),
             static_cast<MiniVec<float, 3>*>(vertex_positions.data_ptr()),
@@ -893,6 +847,8 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             table_indices.data_ptr<int>(),
             static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
             triangle_counter.data_ptr<int>(), nullptr, iso_value, weight_thr,
@@ -912,6 +868,8 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
             static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_cell2cell.data_ptr()),
+            static_cast<MiniVec<int64_t, 8>*>(
+                    neighbor_table_cell2grid.data_ptr()),
             table_indices.data_ptr<int>(),
             static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
             triangle_counter.data_ptr<int>(),
