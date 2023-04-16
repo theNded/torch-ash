@@ -98,7 +98,6 @@ class SparseDenseGridQuery(torch.autograd.Function):
         )
         ctx.grid_dim = grid_dim
 
-        print("before query_forward")
         y = backend.query_forward(
             embeddings,
             offsets,
@@ -110,7 +109,6 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
             grid_dim,
         )
-        print("after query_forward")
         return y
 
     @staticmethod
@@ -128,7 +126,6 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
-        print("before backward forward wrapper")
         dLdembedding, dLdoffsets = SparseDenseGridQueryBackward.apply(
             z,
             embeddings,
@@ -141,7 +138,6 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
-        print("after backward forward wrapper")
         return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
 
 
@@ -203,11 +199,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         ) = ctx.saved_tensors
 
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
-        print(
-            "grad_dLdembedding:", grad_dLdembedding, "grad_dLdoffest:", grad_dLdoffset
-        )
-
-        print("before backward backward")
         dLdembedding, dLdoffset = backend.query_backward_backward(
             grad_dLdembedding,
             grad_dLdoffset,
@@ -222,7 +213,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
-        print("after backward backward")
         return dLdembedding, None, None, None, None, None, None, None, None, None
 
 
@@ -691,6 +681,7 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         bbox_max: torch.Tensor = torch.ones(3),
         device: Optional[Union[str, torch.device]] = None,
     ):
+        assert in_dim == 3, "Only 3D is supported now"
         super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
         self.cell_size = (bbox_max - bbox_min) / (sparse_grid_dim * grid_dim - 1)

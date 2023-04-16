@@ -4,6 +4,8 @@
 #include "minivec.h"
 #include "sparsedense_grid.h"
 
+// Now only dispatch dtypes, all the queries are for 3D
+// TODO: dispatch for 2D/4D later
 template <typename scalar_t>
 __global__ void query_forward_kernel(
         const scalar_t* __restrict__ embeddings,
@@ -87,19 +89,21 @@ at::Tensor query_forward(
 
     at::Tensor output = at::zeros({len, embedding_dims}, embeddings.options());
 
-    query_forward_kernel<float><<<blocks, threads>>>(
-            embeddings.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            masks.data_ptr<bool>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            output.data_ptr<float>(), grid_dim, num_cells_per_grid,
-            embedding_dims, len);
+    AT_DISPATCH_FLOATING_TYPES(embeddings.scalar_type(), "query_forward", [&] {
+        query_forward_kernel<scalar_t><<<blocks, threads>>>(
+                embeddings.data_ptr<scalar_t>(),
+                static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                grid_indices.data_ptr<int64_t>(),
+                cell_indices.data_ptr<int64_t>(), masks.data_ptr<bool>(),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                output.data_ptr<scalar_t>(), grid_dim, num_cells_per_grid,
+                embedding_dims, len);
+    });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
@@ -215,22 +219,24 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
     at::Tensor dLdembedding = at::zeros_like(embeddings);
     at::Tensor dLdoffsets = at::zeros_like(offsets);
 
-    // std::cout << "z in backward forward:" << z << std::endl;
-    // std::cout << "embedding in backward forward:" << embeddings << std::endl;
-    query_backward_forward_kernel<float><<<blocks, threads>>>(
-            z.data_ptr<float>(), embeddings.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            masks.data_ptr<bool>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            dLdembedding.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()), grid_dim,
-            num_cells_per_grid, embedding_dims, len);
+    AT_DISPATCH_FLOATING_TYPES(
+            z.scalar_type(), "query_backward_forward_kernel", [&] {
+                query_backward_forward_kernel<scalar_t><<<blocks, threads>>>(
+                        z.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(),
+                        static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                        grid_indices.data_ptr<int64_t>(),
+                        cell_indices.data_ptr<int64_t>(),
+                        masks.data_ptr<bool>(),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_grid2grid.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2cell.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2grid.data_ptr()),
+                        dLdembedding.data_ptr<scalar_t>(),
+                        static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()),
+                        grid_dim, num_cells_per_grid, embedding_dims, len);
+            });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return std::make_tuple(dLdembedding, dLdoffsets);
@@ -351,22 +357,22 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
     // ignored for now
     at::Tensor dLdoffsets = at::zeros_like(offsets);
 
-    // std::cout << "z in backward forward:" << z << std::endl;
-    // std::cout << "embedding in backward forward:" << embeddings << std::endl;
-    query_backward_backward_kernel<float><<<blocks, threads>>>(
-            grad_dLdoffset.data_ptr<float>(), z.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-            grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            masks.data_ptr<bool>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            dLdembedding.data_ptr<float>(),
-            static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()), grid_dim,
-            num_cells_per_grid, embedding_dims, len);
+    AT_DISPATCH_FLOATING_TYPES(z.scalar_type(), "query_backward_backward", [&] {
+        query_backward_backward_kernel<scalar_t><<<blocks, threads>>>(
+                grad_dLdoffset.data_ptr<scalar_t>(), z.data_ptr<scalar_t>(),
+                static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                grid_indices.data_ptr<int64_t>(),
+                cell_indices.data_ptr<int64_t>(), masks.data_ptr<bool>(),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                dLdembedding.data_ptr<scalar_t>(),
+                static_cast<MiniVec<float, 3>*>(dLdoffsets.data_ptr()),
+                grid_dim, num_cells_per_grid, embedding_dims, len);
+    });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return std::make_tuple(dLdembedding, dLdoffsets);
@@ -401,10 +407,6 @@ __global__ void isosurface_extraction_kernel(
     const MiniVec<int, 3>& sparse_coord = grid_coords_table[grid_idx];
     const MiniVec<int64_t, 8>& neighbor_grid2grid =
             neighbor_table_grid2grid[grid_idx];
-    if (grid_idx != neighbor_grid2grid[0] or grid_idx == -1) {
-        printf("extract isosurfaces: should never reach here!\n");
-        return;
-    }
 
     int cell_idx = dense_i;
     const MiniVec<int, 3>& cell_coord = cell_coords_table[cell_idx];
@@ -479,38 +481,51 @@ at::Tensor isosurface_extraction(
 
     int num_cells_per_grid = sdfs.size(1);
 
-    isosurface_extraction_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(grid_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            output_counter.data_ptr<int>(), nullptr, iso_value, weight_thr,
-            grid_dim, num_cells_per_grid, len);
+    AT_DISPATCH_FLOATING_TYPES(
+            sdfs.scalar_type(), "isosurface_extraction_kernel", ([&] {
+                isosurface_extraction_kernel<scalar_t><<<blocks, threads>>>(
+                        sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                        grid_indices.data_ptr<int64_t>(),
+                        static_cast<MiniVec<int, 3>*>(
+                                grid_coords_table.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_grid2grid.data_ptr()),
+                        static_cast<MiniVec<int, 3>*>(
+                                cell_coords_table.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2cell.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2grid.data_ptr()),
+                        output_counter.data_ptr<int>(), nullptr, iso_value,
+                        weight_thr, grid_dim, num_cells_per_grid, len);
+            }));
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     at::Tensor output_positions =
             at::zeros({output_counter.item<int>(), 3}, sdfs.options());
     output_counter = at::zeros({}, grid_coords_table.options());
-    isosurface_extraction_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(grid_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            output_counter.data_ptr<int>(),
-            static_cast<MiniVec<float, 3>*>(output_positions.data_ptr()),
-            iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
+
+    AT_DISPATCH_FLOATING_TYPES(
+            sdfs.scalar_type(), "isosurface_extraction_kernel", ([&] {
+                isosurface_extraction_kernel<scalar_t><<<blocks, threads>>>(
+                        sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                        grid_indices.data_ptr<int64_t>(),
+                        static_cast<MiniVec<int, 3>*>(
+                                grid_coords_table.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_grid2grid.data_ptr()),
+                        static_cast<MiniVec<int, 3>*>(
+                                cell_coords_table.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2cell.data_ptr()),
+                        static_cast<MiniVec<int64_t, 8>*>(
+                                neighbor_table_cell2grid.data_ptr()),
+                        output_counter.data_ptr<int>(),
+                        static_cast<MiniVec<float, 3>*>(
+                                output_positions.data_ptr()),
+                        iso_value, weight_thr, grid_dim, num_cells_per_grid,
+                        len);
+            }));
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return output_positions;
@@ -773,10 +788,6 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
     const int64_t threads = 256;
     const int64_t blocks = (len + threads - 1) / threads;
 
-    std::cout << "num_embeddings: " << num_embeddings << std::endl;
-    std::cout << "num_cells_per_grid: " << num_cells_per_grid << std::endl;
-    std::cout << "num_sparse_grids: " << num_sparse_grids << std::endl;
-
     // Determine marching cubes table idx and vertex existence per cell
     auto options =
             at::TensorOptions().dtype(torch::kInt32).device(sdfs.device());
@@ -787,85 +798,77 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
             at::zeros({num_embeddings, num_cells_per_grid, 3}, options);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    printf("Before calling marching_cubes_table_idx_kernel\n");
+    at::Tensor triangles = at::zeros({0, 3}, options);
+    at::Tensor vertex_positions = at::zeros({0, 3}, sdfs.options());
 
-    marching_cubes_table_idx_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            table_indices.data_ptr<int>(),
-            static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
-            iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
-    C10_CUDA_CHECK(cudaDeviceSynchronize());
-    printf("After calling marching_cubes_table_indices_kernel\n");
-    int num_vertices = edge_vertex_indices.eq(-1).sum().item<int>();
-    std::cout << num_vertices << std::endl;
-    at::Tensor vertex_counter = at::zeros({}, options);
-    at::Tensor vertex_positions = at::zeros({num_vertices, 3}, sdfs.options());
-    // return std::tuple<at::Tensor, at::Tensor>(at::zeros({}),
-    // vertex_positions);
+    AT_DISPATCH_FLOATING_TYPES(sdfs.scalar_type(), "marching_cubes", [&] {
+        marching_cubes_table_idx_kernel<scalar_t><<<blocks, threads>>>(
+                sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                grid_indices.data_ptr<int64_t>(),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                table_indices.data_ptr<int>(),
+                static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
+                iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
+        C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Determine vertex positions
-    printf("Before calling marching_cubes_vertex_kernel\n");
-    marching_cubes_vertex_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(grid_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
-            vertex_counter.data_ptr<int>(),
-            static_cast<MiniVec<float, 3>*>(vertex_positions.data_ptr()),
-            iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
-    C10_CUDA_CHECK(cudaDeviceSynchronize());
-    std::cout << "vertex_counter: " << vertex_counter.item<int>() << std::endl;
+        int num_vertices = edge_vertex_indices.eq(-1).sum().item<int>();
+        at::Tensor vertex_counter = at::zeros({}, options);
+        vertex_positions = at::zeros({num_vertices, 3}, sdfs.options());
+        marching_cubes_vertex_kernel<scalar_t><<<blocks, threads>>>(
+                sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                grid_indices.data_ptr<int64_t>(),
+                static_cast<MiniVec<int, 3>*>(grid_coords_table.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int, 3>*>(cell_coords_table.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
+                vertex_counter.data_ptr<int>(),
+                static_cast<MiniVec<float, 3>*>(vertex_positions.data_ptr()),
+                iso_value, weight_thr, grid_dim, num_cells_per_grid, len);
+        C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    at::Tensor triangle_counter = at::zeros({}, options);
-    printf("pass 1: triangle kernel\n");
-    marching_cubes_triangle_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            table_indices.data_ptr<int>(),
-            static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
-            triangle_counter.data_ptr<int>(), nullptr, iso_value, weight_thr,
-            grid_dim, num_cells_per_grid, len);
-    C10_CUDA_CHECK(cudaDeviceSynchronize());
+        at::Tensor triangle_counter = at::zeros({}, options);
+        marching_cubes_triangle_kernel<scalar_t><<<blocks, threads>>>(
+                sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                grid_indices.data_ptr<int64_t>(),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                table_indices.data_ptr<int>(),
+                static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
+                triangle_counter.data_ptr<int>(), nullptr, iso_value,
+                weight_thr, grid_dim, num_cells_per_grid, len);
+        C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    printf("pass 2: triangle kernel\n");
-    at::Tensor triangles =
-            at::zeros({triangle_counter.item<int>(), 3}, options);
-    triangle_counter.zero_();
-    marching_cubes_triangle_kernel<float><<<blocks, threads>>>(
-            sdfs.data_ptr<float>(), weights.data_ptr<float>(),
-            grid_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_grid2grid.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2cell.data_ptr()),
-            static_cast<MiniVec<int64_t, 8>*>(
-                    neighbor_table_cell2grid.data_ptr()),
-            table_indices.data_ptr<int>(),
-            static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
-            triangle_counter.data_ptr<int>(),
-            static_cast<MiniVec<int, 3>*>(triangles.data_ptr()), iso_value,
-            weight_thr, grid_dim, num_cells_per_grid, len);
-    C10_CUDA_CHECK(cudaDeviceSynchronize());
-
+        triangles = at::zeros({triangle_counter.item<int>(), 3}, options);
+        triangle_counter.zero_();
+        marching_cubes_triangle_kernel<scalar_t><<<blocks, threads>>>(
+                sdfs.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(),
+                grid_indices.data_ptr<int64_t>(),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_grid2grid.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2cell.data_ptr()),
+                static_cast<MiniVec<int64_t, 8>*>(
+                        neighbor_table_cell2grid.data_ptr()),
+                table_indices.data_ptr<int>(),
+                static_cast<MiniVec<int, 3>*>(edge_vertex_indices.data_ptr()),
+                triangle_counter.data_ptr<int>(),
+                static_cast<MiniVec<int, 3>*>(triangles.data_ptr()), iso_value,
+                weight_thr, grid_dim, num_cells_per_grid, len);
+        C10_CUDA_CHECK(cudaDeviceSynchronize());
+    });
     return {triangles, vertex_positions};
 }
