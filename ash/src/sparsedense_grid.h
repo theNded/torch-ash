@@ -9,7 +9,6 @@ at::Tensor query_forward(
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
@@ -36,7 +35,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
@@ -73,7 +71,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)

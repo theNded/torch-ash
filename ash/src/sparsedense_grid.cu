@@ -10,7 +10,6 @@ __global__ void query_forward_kernel(
         const MiniVec<float, 3>* __restrict__ offsets,
         const int64_t* __restrict__ grid_indices,
         const int64_t* __restrict__ cell_indices,
-        const MiniVec<int, 3>* __restrict__ cell_coords,
         const bool* __restrict__ masks,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
@@ -27,7 +26,6 @@ __global__ void query_forward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    const MiniVec<int, 3>& cell_coord = cell_coords[i];
     const MiniVec<float, 3>& offset = offsets[i];
 
     const MiniVec<int64_t, 8>& neighbor_grid2grid =
@@ -73,7 +71,6 @@ at::Tensor query_forward(
         const at::Tensor& offsets,
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
@@ -94,7 +91,6 @@ at::Tensor query_forward(
             embeddings.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
             grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
@@ -116,7 +112,6 @@ __global__ void query_backward_forward_kernel(
         const MiniVec<float, 3>* __restrict__ offsets,
         const int64_t* __restrict__ grid_indices,
         const int64_t* __restrict__ cell_indices,
-        const MiniVec<int, 3>* __restrict__ cell_coords,
         const bool* __restrict__ masks,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
@@ -134,7 +129,6 @@ __global__ void query_backward_forward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    const MiniVec<int, 3>& cell_coord = cell_coords[i];
     const MiniVec<float, 3>& offset = offsets[i];
 
     const MiniVec<int64_t, 8>& neighbor_grid2grid =
@@ -205,7 +199,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& offsets,
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
@@ -228,7 +221,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
             z.data_ptr<float>(), embeddings.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
             grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
@@ -251,7 +243,6 @@ __global__ void query_backward_backward_kernel(
         const MiniVec<float, 3>* __restrict__ offsets,
         const int64_t* __restrict__ grid_indices,
         const int64_t* __restrict__ cell_indices,
-        const MiniVec<int, 3>* __restrict__ cell_coords,
         const bool* __restrict__ masks,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
@@ -269,7 +260,6 @@ __global__ void query_backward_backward_kernel(
 
     int grid_idx = grid_indices[i];
     int cell_idx = cell_indices[i];
-    const MiniVec<int, 3>& cell_coord = cell_coords[i];
     const MiniVec<float, 3>& offset = offsets[i];
 
     const MiniVec<int64_t, 8>& neighbor_grid2grid =
@@ -342,7 +332,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         // queried x via a non-differentiable hash map lookup beforehand
         const at::Tensor& grid_indices,
         const at::Tensor& cell_indices,
-        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
         const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
@@ -369,7 +358,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
             grad_dLdoffset.data_ptr<float>(), z.data_ptr<float>(),
             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
             grid_indices.data_ptr<int64_t>(), cell_indices.data_ptr<int64_t>(),
-            static_cast<MiniVec<int, 3>*>(cell_coords.data_ptr()),
             masks.data_ptr<bool>(),
             static_cast<MiniVec<int64_t, 8>*>(
                     neighbor_table_grid2grid.data_ptr()),
