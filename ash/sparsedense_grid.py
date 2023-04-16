@@ -138,6 +138,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
+        print('backward apply:', dLdembedding[:, 0].abs().mean())
         return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
 
 
@@ -182,6 +183,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_dim,
         )
         # w1: dLdembedding, w2: dLdoffsets
+
+        print('bacward forward:', z, w2)
+
         return w1, w2
 
     @staticmethod
@@ -213,7 +217,8 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
-        return dLdembedding, None, None, None, None, None, None, None, None, None
+        print('backward backward:', z, grad_dLdoffset, dLdembedding[:, 0].abs().mean())
+        return None, dLdembedding, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGrid(ASHModule):
@@ -256,6 +261,10 @@ class SparseDenseGrid(ASHModule):
         grid_dim: int,
         device: Optional[Union[str, torch.device]] = torch.device("cpu"),
     ):
+
+        assert in_dim == 3, "Only 3D sparse-dense grid is supported for now."
+        assert embedding_dim <= 16, "Embedding dim must be <= 16 for now."
+
         super().__init__()
 
         self.transform_world_to_cell = lambda x: x
@@ -299,10 +308,6 @@ class SparseDenseGrid(ASHModule):
             self.neighbor_table_cell2grid = (
                 self.neighbor_table_cell2grid + cell_boundary_mask[:, i] * (2**i)
             )
-
-        print(dense_neighbor_coords)
-        print(cell_boundary_mask)
-        print(self.neighbor_table_cell2grid)
 
         self.neighbor_table_cell2cell = self._linearize_cell_coords(
             dense_neighbor_coords % grid_dim
