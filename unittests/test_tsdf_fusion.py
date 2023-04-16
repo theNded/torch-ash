@@ -89,7 +89,7 @@ class TSDFFusion:
             in_dim=3,
             num_embeddings=10000,
             embedding_dim=5,
-            dense_grid_dim=16,
+            grid_dim=16,
             dense_cell_size=voxel_size,
             device=self.device,
         )
@@ -98,8 +98,8 @@ class TSDFFusion:
     def fuse_dataset(self, dataset):
         for i in range(len(dataset)):
             datum = DotDict(dataset[i])
-            if i > 2:
-                break
+            # if i > 2:
+            #     break
             self.fuse_frame(
                 color=torch.from_numpy(datum.color).to(self.device) / 255.0,
                 depth=torch.from_numpy(datum.depth).to(self.device) / self.depth_scale,
@@ -169,12 +169,12 @@ class TSDFFusion:
 
         # Insertion
         (
-            sparse_coords,
-            dense_coords,
-            sparse_indices,
-            dense_indices,
+            grid_coords,
+            cell_coords,
+            grid_indices,
+            cell_indices,
         ) = self.grid.spatial_init_(points)
-        cell_coords = self.grid.cell_to_world(sparse_coords, dense_coords)
+        cell_coords = self.grid.cell_to_world(grid_coords, cell_coords)
 
         # Observation
         sdf, rgb, w = self.project_points(
@@ -182,7 +182,7 @@ class TSDFFusion:
         )
 
         # Fusion
-        embedding = self.grid.embeddings[sparse_indices, dense_indices]
+        embedding = self.grid.embeddings[grid_indices, cell_indices]
 
         w_sum = embedding[..., 4:5]
         sdf_mean = embedding[..., 0:1]
@@ -199,7 +199,7 @@ class TSDFFusion:
         embedding[..., 4:5] = w_updated
         embedding[..., 0:1] = sdf_updated
         embedding[..., 1:4] = rgb_updated
-        self.grid.embeddings[sparse_indices, dense_indices] = embedding
+        self.grid.embeddings[grid_indices, cell_indices] = embedding
 
     def marching_cubes(self):
         triangles, positions = self.grid.marching_cubes()
