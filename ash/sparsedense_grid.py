@@ -9,6 +9,16 @@ from .common import _get_c_extension
 
 backend = _get_c_extension()
 
+"""
+Glossary:
+SparseDenseGrid is constructed by:
+    - sparse [grids], each of which is a dense array of
+    - [cells], whose element number is grid_dim**3
+It is a single-resolution grid but optimized by geometry spatial distribution.
+Each cell's embedding is stored separately, and can be accessed by
+    embeddings[grid_idx, cell_idx].
+"""
+
 
 def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Tensor:
     """Generate neighbor coordinate offsets.
@@ -40,24 +50,24 @@ def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Ten
 
 
 class SparseDenseGridQuery(torch.autograd.Function):
-    """Query the embeddings given x defined by offsets, sparse_indices, and dense_indices.
+    """Query the embeddings given x defined by offsets, grid_indices, and cell_indices.
     The overall idea is to compute:
     y, z = f(x), f'(x)
 
     y, z = zeros(), zeros()
     for nb in nbs:
-        feature_nb = embeddings[sparse_neighbor_indices_table[sparse_indices, sparse_offset(nb)],
-                                dense_neighbor_indices_table[dense_indices, nb]]
+        feature_nb = embeddings[neighbor_table_grid2grid[grid_indices, sparse_offset(nb)],
+                                neighbor_table_cell2cell[cell_indices, nb]]
         y += weight(x_offsets[nb]) * feature_nb
         z += dweight_dx(x_offsets[nb]) * feature_nb
     return output
     Args:
-        embeddings: (num_embeddings, cells_per_dense_grid, embedding_dim) tensor.
-        sparse_indices: (num_x) tensor with sparse indices.
-        dense_indices: (num_x) tensor with dense indices.
+        embeddings: (num_embeddings, num_cells_per_grid, embedding_dim) tensor.
+        grid_indices: (num_x) tensor with sparse indices.
+        cell_indices: (num_x) tensor with dense indices.
         offsets: (num_x, in_dim) tensor with offsets at the unit of cells, used for interpolation.
-        sparse_neighbor_indices_table: (num_embeddings, 8) tensor indices of sparse neighbor grids.
-        dense_neighbor_indices_table: (num_embeddings, 8) tensor indices of dense neighbor cells.
+        neighbor_table_grid2grid: (num_embeddings, 8) tensor indices of sparse neighbor grids.
+        neighbor_table_cell2cell: (num_embeddings, 8) tensor indices of dense neighbor cells.
     Returns:
         y: (num_x, embedding_dim) tensor. Interpoated embedding.
         z: (num_x, in_dim, embedding_dim) tensor. Closed-form gradient of feature w.r.t. embedding.
@@ -68,37 +78,37 @@ class SparseDenseGridQuery(torch.autograd.Function):
         ctx,
         embeddings: torch.Tensor,
         offsets: torch.Tensor,
-        sparse_indices: torch.Tensor,
-        dense_indices: torch.Tensor,
-        dense_coords: torch.Tensor,
+        grid_indices: torch.Tensor,
+        cell_indices: torch.Tensor,
+        cell_coords: torch.Tensor,
         masks: torch.Tensor,
-        sparse_neighbor_indices_table: torch.Tensor,
-        dense_neighbor_indices_table: torch.Tensor,
-        dense_grid_dim: int,
+        neighbor_table_grid2grid: torch.Tensor,
+        neighbor_table_cell2cell: torch.Tensor,
+        grid_dim: int,
     ) -> torch.Tensor:
         ctx.save_for_backward(
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
         )
-        ctx.dense_grid_dim = dense_grid_dim
+        ctx.grid_dim = grid_dim
 
         print("before query_forward")
         y = backend.query_forward(
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
-            dense_grid_dim,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
+            grid_dim,
         )
         print("after query_forward")
         return y
@@ -110,12 +120,12 @@ class SparseDenseGridQuery(torch.autograd.Function):
         (
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
         ) = ctx.saved_tensors
 
         print("before backward forward wrapper")
@@ -123,13 +133,13 @@ class SparseDenseGridQuery(torch.autograd.Function):
             z,
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
-            ctx.dense_grid_dim,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
+            ctx.grid_dim,
         )
         print("after backward forward wrapper")
         return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
@@ -142,26 +152,26 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         z,
         embeddings,
         offsets,
-        sparse_indices,
-        dense_indices,
-        dense_coords,
+        grid_indices,
+        cell_indices,
+        cell_coords,
         masks,
-        sparse_neighbor_indices_table,
-        dense_neighbor_indices_table,
-        dense_grid_dim,
+        neighbor_table_grid2grid,
+        neighbor_table_cell2cell,
+        grid_dim,
     ):
         ctx.save_for_backward(
             z,
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
         )
-        ctx.dense_grid_dim = dense_grid_dim
+        ctx.grid_dim = grid_dim
 
         print("before backward forward")
         print("offsets:", offsets)
@@ -169,13 +179,13 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             z,
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
-            dense_grid_dim,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
+            grid_dim,
         )
         print("after backward forward")
         # w1: dLdembedding, w2: dLdoffsets
@@ -189,16 +199,18 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             z,
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
         ) = ctx.saved_tensors
 
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
-        print("grad_dLdembedding:", grad_dLdembedding, "grad_dLdoffest:", grad_dLdoffset)
+        print(
+            "grad_dLdembedding:", grad_dLdembedding, "grad_dLdoffest:", grad_dLdoffset
+        )
 
         print("before backward backward")
         dLdembedding, dLdoffset = backend.query_backward_backward(
@@ -207,13 +219,13 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             z,
             embeddings,
             offsets,
-            sparse_indices,
-            dense_indices,
-            dense_coords,
+            grid_indices,
+            cell_indices,
+            cell_coords,
             masks,
-            sparse_neighbor_indices_table,
-            dense_neighbor_indices_table,
-            ctx.dense_grid_dim,
+            neighbor_table_grid2grid,
+            neighbor_table_cell2cell,
+            ctx.grid_dim,
         )
         print("after backward backward")
         return dLdembedding, None, None, None, None, None, None, None, None, None
@@ -221,11 +233,11 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
 
 class SparseDenseGrid(ASHModule):
     """
-    Create an embedding of (num_embeddings, grid_dim^in_dim * dense_grid_dim).
+    Create an embedding of (num_embeddings, grid_dim^in_dim * embedding_dim).
     The embedding is a sparse-dense grid, where each [grid] is a dense [array of cells].
 
     The unit of input is measured by the number of cells.
-    Here is the coordinate convention of a sparse-dense grid with dense_grid_dim = 3.
+    Here is the coordinate convention of a sparse-dense grid with grid_dim = 3.
     (Note the local grids are dense, the indices are only selectively shown for clarity.)
 
     In this case, coordinate (1.2, 1.4) will be mapped to cell X (valid),
@@ -256,7 +268,7 @@ class SparseDenseGrid(ASHModule):
         in_dim: int,
         num_embeddings: int,
         embedding_dim: int,
-        dense_grid_dim: int,
+        grid_dim: int,
         device: Optional[Union[str, torch.device]] = torch.device("cpu"),
     ):
         super().__init__()
@@ -267,14 +279,14 @@ class SparseDenseGrid(ASHModule):
         self.in_dim = in_dim
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
-        self.dense_grid_dim = dense_grid_dim
+        self.grid_dim = grid_dim
         self.device = isinstance(device, str) and torch.device(device) or device
 
         self.engine = ASHEngine(in_dim, num_embeddings, device)
-        self.cells_per_dense_grid = dense_grid_dim**in_dim
+        self.num_cells_per_grid = grid_dim**in_dim
         self.embeddings = nn.Parameter(
             torch.zeros(
-                num_embeddings, self.cells_per_dense_grid, embedding_dim, device=device
+                num_embeddings, self.num_cells_per_grid, embedding_dim, device=device
             )
         )
 
@@ -284,53 +296,67 @@ class SparseDenseGrid(ASHModule):
         )
 
         # Dense grid look up tables for each cell and their neighbors
-        self.dense_indices = torch.arange(
-            self.cells_per_dense_grid, dtype=torch.long, device=self.device
+        self.cell_indices = torch.arange(
+            self.num_cells_per_grid, dtype=torch.long, device=self.device
         )
-        self.dense_coords = self._delinearize_dense_indices(self.dense_indices)
-        assert self.dense_coords.shape == (self.cells_per_dense_grid, in_dim)
+        self.cell_coords = self._delinearize_cell_indices(self.cell_indices)
+        assert self.cell_coords.shape == (self.num_cells_per_grid, in_dim)
 
         dense_neighbor_coords = (
-            self.dense_coords.view(-1, 1, in_dim) + self.neighbor_coord_offsets
-        ).view(-1, 3) % dense_grid_dim
-        self.dense_neighbor_indices_table = self._linearize_dense_coords(
-            dense_neighbor_coords
-        ).view(self.cells_per_dense_grid, -1)
+            self.cell_coords.view(-1, 1, in_dim) + self.neighbor_coord_offsets
+        ).view(-1, 3) % grid_dim
 
-        assert self.dense_neighbor_indices_table.shape == (
-            self.cells_per_dense_grid,
+        cell_boundary_mask = (dense_neighbor_coords + 1 == grid_dim).long()
+        self.neighbor_table_cell2grid = torch.zeros(
+            self.num_cells_per_grid * 2**in_dim, device=self.device, dtype=torch.long
+        )
+        for i in range(in_dim):
+            self.neighbor_table_cell2grid = (
+                self.neighbor_table_cell2grid + cell_boundary_mask[:, i] * (2**i)
+            )
+
+        print(dense_neighbor_coords)
+        print(cell_boundary_mask)
+        print(self.neighbor_table_cell2grid)
+
+        self.neighbor_table_cell2cell = self._linearize_cell_coords(
+            dense_neighbor_coords
+        ).view(self.num_cells_per_grid, -1)
+
+        assert self.neighbor_table_cell2cell.shape == (
+            self.num_cells_per_grid,
             2**in_dim,
         )
 
         # Sparse grid look up tables for each grid and their neighbors
         # Need to be constructed after spatial intialization
-        self.sparse_coords = None
-        self.sparse_neighbor_indices_table = None
+        self.grid_coords = None
+        self.neighbor_table_grid2grid = None
 
     @torch.no_grad()
-    def _linearize_dense_coords(self, dense_coords: torch.Tensor) -> torch.Tensor:
-        assert len(dense_coords.shape) == 2 and dense_coords.shape[1] == self.in_dim
+    def _linearize_cell_coords(self, cell_coords: torch.Tensor) -> torch.Tensor:
+        assert len(cell_coords.shape) == 2 and cell_coords.shape[1] == self.in_dim
 
         """Convert dense coordinates to dense indices."""
-        dense_indices = torch.zeros_like(
-            dense_coords[:, 0], dtype=torch.long, device=self.device
+        cell_indices = torch.zeros_like(
+            cell_coords[:, 0], dtype=torch.long, device=self.device
         )
         for i in range(self.in_dim):
-            dense_indices += dense_coords[:, i] * self.dense_grid_dim**i
-        return dense_indices.long()
+            cell_indices += cell_coords[:, i] * self.grid_dim**i
+        return cell_indices.long()
 
     @torch.no_grad()
-    def _delinearize_dense_indices(self, dense_indices: torch.Tensor) -> torch.Tensor:
+    def _delinearize_cell_indices(self, cell_indices: torch.Tensor) -> torch.Tensor:
         """Convert dense indices to dense coordinates."""
-        dense_coords = []
-        dense_indices_iter = dense_indices.clone()
+        cell_coords = []
+        cell_indices_iter = cell_indices.clone()
         for i in range(self.in_dim):
-            dense_coords.append(dense_indices_iter % self.dense_grid_dim)
-            dense_indices_iter = torch.div(
-                dense_indices_iter, self.dense_grid_dim, rounding_mode="floor"
+            cell_coords.append(cell_indices_iter % self.grid_dim)
+            cell_indices_iter = torch.div(
+                cell_indices_iter, self.grid_dim, rounding_mode="floor"
             )
-        dense_coords = torch.stack(dense_coords, dim=1)
-        return dense_coords.int()
+        cell_coords = torch.stack(cell_coords, dim=1)
+        return cell_coords.int()
 
     @torch.no_grad()
     def construct_sparse_neighbor_tables_(self, radius=1, bidirection=False) -> None:
@@ -338,14 +364,14 @@ class SparseDenseGrid(ASHModule):
         This should only be called once the sparse grid is initialized.
         Used for trilinear interpolation in query and marching cubes.
         Updates:
-            self.sparse_coords: (num_embeddings, in_dim)
-            self.sparse_neighbor_indices_table: (num_embeddings, 2**in_dim)
+            self.grid_coords: (num_embeddings, in_dim)
+            self.neighbor_table_grid2grid: (num_embeddings, 2**in_dim)
         For non-active entries, the neighbor indices are set to -1.
         """
-        active_sparse_coords, active_sparse_indices = self.engine.items()
+        active_grid_coords, active_grid_indices = self.engine.items()
 
         active_sparse_neighbor_coords = (
-            active_sparse_coords.view(-1, 1, self.in_dim).int()
+            active_grid_coords.view(-1, 1, self.in_dim).int()
             + self.neighbor_coord_offsets.view(1, -1, self.in_dim).int()
         ).view(-1, self.in_dim)
 
@@ -357,35 +383,35 @@ class SparseDenseGrid(ASHModule):
         active_sparse_neighbor_indices[~active_sparse_neighbor_masks] = -1
 
         # Create a dense lookup table for sparse coords and neighbor indices
-        self.sparse_coords = torch.empty(
+        self.grid_coords = torch.empty(
             (self.num_embeddings, self.in_dim), dtype=torch.int32, device=self.device
         )
-        self.sparse_coords.fill_(-1)
-        self.sparse_coords[active_sparse_indices] = active_sparse_coords
+        self.grid_coords.fill_(-1)
+        self.grid_coords[active_grid_indices] = active_grid_coords
 
-        self.sparse_neighbor_indices_table = torch.empty(
+        self.neighbor_table_grid2grid = torch.empty(
             self.num_embeddings, 2**self.in_dim, dtype=torch.int64, device=self.device
         )
-        self.sparse_neighbor_indices_table.fill_(-1)
-        self.sparse_neighbor_indices_table[
-            active_sparse_indices
+        self.neighbor_table_grid2grid.fill_(-1)
+        self.neighbor_table_grid2grid[
+            active_grid_indices
         ] = active_sparse_neighbor_indices.view(-1, 8)
 
     def query(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns:
-        sparse_indices: (N, 1) tensor of sparse grid indices
-        dense_indices: (N, 1) tensor of dense grid indices
+        grid_indices: (N, 1) tensor of sparse grid indices
+        cell_indices: (N, 1) tensor of dense grid indices
         offsets: (N, in_dim) tensor of offsets in dense grid units
         """
         # TODO: merge in one pass for efficiency if necessary
-        x_sparse = (x / self.dense_grid_dim).floor()
-        x_dense = x - x_sparse * self.dense_grid_dim
+        x_sparse = (x / self.grid_dim).floor()
+        x_dense = x - x_sparse * self.grid_dim
         offsets = x_dense - x_dense.floor()
 
-        sparse_indices, masks = self.engine.find(x_sparse.int())
-        dense_indices = self._linearize_dense_coords(x_dense.int())
+        grid_indices, masks = self.engine.find(x_sparse.int())
+        cell_indices = self._linearize_cell_coords(x_dense.int())
 
-        return sparse_indices, dense_indices, x_dense.floor().int(), offsets, masks
+        return grid_indices, cell_indices, x_dense.floor().int(), offsets, masks
 
     def forward(
         self,
@@ -407,26 +433,26 @@ class SparseDenseGrid(ASHModule):
         """
         x = self.transform_world_to_cell(x)
 
-        sparse_indices, dense_indices, dense_coords, offsets, masks = self.query(x)
+        grid_indices, cell_indices, cell_coords, offsets, masks = self.query(x)
 
         print("x: ", x)
         print("offsets: ", offsets)
 
         if interpolation == "nearest":
             assert compute_grad_x is False
-            return self.embeddings[sparse_indices, dense_indices], masks
+            return self.embeddings[grid_indices, cell_indices], masks
 
         elif interpolation == "linear":
             features = SparseDenseGridQuery.apply(
                 self.embeddings,
                 offsets,
-                sparse_indices,
-                dense_indices,
-                dense_coords,
+                grid_indices,
+                cell_indices,
+                cell_coords,
                 masks,
-                self.sparse_neighbor_indices_table,
-                self.dense_neighbor_indices_table,
-                self.dense_grid_dim,
+                self.neighbor_table_grid2grid,
+                self.neighbor_table_cell2cell,
+                self.grid_dim,
             )
             return features, masks
         else:
@@ -436,43 +462,43 @@ class SparseDenseGrid(ASHModule):
         """Used for direct assignment, e.g. initialization with fusion, marching cubes.
         Queries happen at integer locations.
 
-        Here M = dense_grid_dim**in_dim (items per dense grid)
+        Here M = grid_dim**in_dim (items per dense grid)
         Returns:
-            sparse_coords: (N, 1, in_dim) tensor of keys
-            dense_coords: (1, M, in_dim) tensor of keys
-            sparse_indices: (N, 1) tensor of features
-            dense_indices: (1, M) tensor of features
+            grid_coords: (N, 1, in_dim) tensor of keys
+            cell_coords: (1, M, in_dim) tensor of keys
+            grid_indices: (N, 1) tensor of features
+            cell_indices: (1, M) tensor of features
 
         For compactness, the coordinates are viewed with the
         (sparse-dim, dense-dim, [embedding-dim]) convention for easier broadcasting.
 
         The coordinates in the sparse-dense system can be computed by
-            x = sparse_coords * dense_grid_dim + dense_coords
+            x = grid_coords * grid_dim + cell_coords
         Their associated embedding can be accessed by
-            feats = self.embeddings[sparse_indices, dense_indices]
+            feats = self.embeddings[grid_indices, cell_indices]
         """
-        sparse_coords, sparse_indices = self.engine.items()
+        grid_coords, grid_indices = self.engine.items()
 
         return (
-            sparse_coords.view(-1, 1, self.in_dim),
-            self.dense_coords.view(1, -1, self.in_dim),
-            sparse_indices.view(-1, 1),
-            self.dense_indices.view(1, -1),
+            grid_coords.view(-1, 1, self.in_dim),
+            self.cell_coords.view(1, -1, self.in_dim),
+            grid_indices.view(-1, 1),
+            self.cell_indices.view(1, -1),
         )
 
     def cell_to_world(
-        self, sparse_coords: torch.Tensor, dense_coords: torch.Tensor
+        self, grid_coords: torch.Tensor, cell_coords: torch.Tensor
     ) -> torch.Tensor:
         """Converts cell coordinates to world coordinates.
         Args:
-            sparse_coords: (N, 1, in_dim) tensor of sparse coordinates
-            dense_coords: (1, M, in_dim) tensor of dense coordinates
+            grid_coords: (N, 1, in_dim) tensor of sparse coordinates
+            cell_coords: (1, M, in_dim) tensor of dense coordinates
         Returns:
             world_coords: (N, M, in_dim) tensor of world coordinates
         """
         return self.transform_cell_to_world(
-            sparse_coords.view(-1, 1, self.in_dim) * self.dense_grid_dim
-            + dense_coords.view(1, -1, self.in_dim)
+            grid_coords.view(-1, 1, self.in_dim) * self.grid_dim
+            + cell_coords.view(1, -1, self.in_dim)
         ).view(-1, self.in_dim)
 
     def spatial_init_(self, points: torch.Tensor, dilation: int = 1) -> None:
@@ -486,7 +512,7 @@ class SparseDenseGrid(ASHModule):
         # TODO(wei): optimize for speed if necessary
         points = self.transform_world_to_cell(points)
 
-        sparse_keys = torch.floor(points / self.dense_grid_dim).int()
+        sparse_keys = torch.floor(points / self.grid_dim).int()
         neighbor_coord_offsets = enumerate_neighbors(
             self.in_dim, dilation, bidirectional=False
         ).to(self.device)
@@ -497,17 +523,17 @@ class SparseDenseGrid(ASHModule):
         # No need to use a huge hash set due to the duplicates
         hash_set = HashSet(key_dim=3, capacity=len(sparse_keys), device=self.device)
         hash_set.insert(sparse_keys_with_neighbors)
-        unique_sparse_coords = hash_set.keys()
+        unique_grid_coords = hash_set.keys()
 
-        self.engine.insert_keys(unique_sparse_coords)
-        sparse_indices, masks = self.engine.find(unique_sparse_coords)
+        self.engine.insert_keys(unique_grid_coords)
+        grid_indices, masks = self.engine.find(unique_grid_coords)
         assert masks.all()
 
         return (
-            unique_sparse_coords.view(-1, 1, self.in_dim),
-            self.dense_coords.view(1, -1, self.in_dim),
-            sparse_indices.view(-1, 1),
-            self.dense_indices.view(1, -1),
+            unique_grid_coords.view(-1, 1, self.in_dim),
+            self.cell_coords.view(1, -1, self.in_dim),
+            grid_indices.view(-1, 1),
+            self.cell_indices.view(1, -1),
         )
 
     # Geometry-based initialization
@@ -578,31 +604,31 @@ class SparseDenseGrid(ASHModule):
     ) -> torch.Tensor:
         """Extract isosurface from the grid.
         Args:
-            tsdfs: (num_embeddings, cells_per_dense_grid) tensor of tsdfs
-            weights: (num_embeddings, cells_per_dense_grid) tensor of weights
-            sparse_coords: (N, 3) tensor of sparse coordinates
-            sparse_indices: (N, 1) tensor of sparse indices, N <= num_embeddings
+            tsdfs: (num_embeddings, num_cells_per_grid) tensor of tsdfs
+            weights: (num_embeddings, num_cells_per_grid) tensor of weights
+            grid_coords: (N, 3) tensor of sparse coordinates
+            grid_indices: (N, 1) tensor of sparse indices, N <= num_embeddings
             sparse_neighbor_indices: (N, 2**3) tensor of sparse neighbor indices. -1 means no neighbor
             iso_value: iso value to extract surface
             weight_thr: weight threshold to consider a cell as occupied
         """
 
-        if self.sparse_coords is None or self.sparse_neighbor_indices_table is None:
+        if self.grid_coords is None or self.neighbor_table_grid2grid is None:
             self.construct_sparse_neighbor_tables_()
 
         # Get active entries
-        sparse_coords, sparse_indices = self.engine.items()
+        grid_coords, grid_indices = self.engine.items()
 
         if vertices_only:
             vertices = backend.isosurface_extraction(
                 tsdfs,
                 weights,
-                sparse_indices,
-                self.sparse_coords,
-                self.sparse_neighbor_indices_table,
-                self.dense_coords,
-                self.dense_neighbor_indices_table,
-                self.dense_grid_dim,
+                grid_indices,
+                self.grid_coords,
+                self.neighbor_table_grid2grid,
+                self.cell_coords,
+                self.neighbor_table_cell2cell,
+                self.grid_dim,
                 0.0,
                 1.0,
             )
@@ -612,12 +638,12 @@ class SparseDenseGrid(ASHModule):
             triangles, vertices = backend.marching_cubes(
                 tsdfs,
                 weights,
-                sparse_indices,
-                self.sparse_coords,
-                self.sparse_neighbor_indices_table,
-                self.dense_coords,
-                self.dense_neighbor_indices_table,
-                self.dense_grid_dim,
+                grid_indices,
+                self.grid_coords,
+                self.neighbor_table_grid2grid,
+                self.cell_coords,
+                self.neighbor_table_cell2cell,
+                self.grid_dim,
                 0.0,
                 1.0,
             )
@@ -631,7 +657,7 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
     The unit of the grid is the normalized length of a grid cell.
 
     Example:
-    For a sparse-dense grid bounded within [0,0]--[1,1] with dense_grid_dim=3 and sparse_grid_dim=3,
+    For a sparse-dense grid bounded within [0,0]--[1,1] with grid_dim=3 and sparse_grid_dim=3,
     the voxel unit length is 1 / (3 * 3 - 1) = 1 / 8.
     The origin point will be fixed at (0, 0) of the bounding box.
 
@@ -665,15 +691,15 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         in_dim: int,
         num_embeddings: int,
         embedding_dim: int,
-        dense_grid_dim: int = 8,
+        grid_dim: int = 8,
         sparse_grid_dim: int = 512,
         bbox_min: torch.Tensor = torch.zeros(3),
         bbox_max: torch.Tensor = torch.ones(3),
         device: Optional[Union[str, torch.device]] = None,
     ):
-        super().__init__(in_dim, num_embeddings, embedding_dim, dense_grid_dim, device)
+        super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
-        self.cell_size = (bbox_max - bbox_min) / (sparse_grid_dim * dense_grid_dim - 1)
+        self.cell_size = (bbox_max - bbox_min) / (sparse_grid_dim * grid_dim - 1)
         self.transform_world_to_cell = lambda x: (x - bbox_min) / self.cell_size
         self.transform_cell_to_world = lambda x: x * self.cell_size + bbox_min
         # TODO(wei): contraction
@@ -685,7 +711,7 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
     In this case, a unit length for dense cell unit is required.
 
     Example:
-    For a sparse-dense grid with dense_grid_dim=3 and with dense_cell_unit=1/8,
+    For a sparse-dense grid with grid_dim=3 and with dense_cell_unit=1/8,
     the space will be allocated per initialization.
     The origin point is adaptive to the input.
      ____ ____ ____
@@ -714,11 +740,11 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         in_dim: int,
         num_embeddings: int,
         embedding_dim: int,
-        dense_grid_dim: int,
+        grid_dim: int,
         dense_cell_size: float = 0.01,
         device: Optional[Union[str, torch.device]] = torch.device("cpu"),
     ):
-        super().__init__(in_dim, num_embeddings, embedding_dim, dense_grid_dim, device)
+        super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
         self.cell_size = dense_cell_size
         self.transform_world_to_cell = lambda x: x / self.cell_size

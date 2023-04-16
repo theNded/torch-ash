@@ -7,15 +7,15 @@ at::Tensor query_forward(
         const at::Tensor& embeddings,
         const at::Tensor& offsets,
         // queried x via a non-differentiable hash map lookup beforehand
-        const at::Tensor& sparse_indices,
-        const at::Tensor& dense_indices,
-        const at::Tensor& dense_coords,
+        const at::Tensor& grid_indices,
+        const at::Tensor& cell_indices,
+        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_neighbor_indices_table,
-        const int64_t dense_grid_dim);
+        const at::Tensor& neighbor_table_cell2cell,
+        const int64_t grid_dim);
 
 // clang-format off
 // Triggered both in forward (autograd.grad) and backward (loss.backward)
@@ -33,15 +33,15 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& embeddings,
         const at::Tensor& offsets,
         // queried x via a non-differentiable hash map lookup beforehand
-        const at::Tensor& sparse_indices,
-        const at::Tensor& dense_indices,
-        const at::Tensor& dense_coords,
+        const at::Tensor& grid_indices,
+        const at::Tensor& cell_indices,
+        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
-        const int64_t dense_grid_dim);
+        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const int64_t grid_dim);
 
 // clang-format off
 // Triggered only in backward call w.r.t. z1=dfdx (loss.backward)
@@ -69,28 +69,28 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& embeddings,
         const at::Tensor& offsets,
         // queried x via a non-differentiable hash map lookup beforehand
-        const at::Tensor& sparse_indices,
-        const at::Tensor& dense_indices,
-        const at::Tensor& dense_coords,
+        const at::Tensor& grid_indices,
+        const at::Tensor& cell_indices,
+        const at::Tensor& cell_coords,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
-        const int64_t dense_grid_dim);
+        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const int64_t grid_dim);
 
 at::Tensor isosurface_extraction(
         const at::Tensor& sdfs,
         const at::Tensor& weights,
         // query
-        const at::Tensor& sparse_indices,
+        const at::Tensor& grid_indices,
         // sparse luts
-        const at::Tensor& sparse_coords_table,            // (N, 3)
-        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        const at::Tensor& grid_coords_table,         // (N, 3)
+        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_coords_table,
-        const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
-        const int64_t dense_grid_dim,
+        const at::Tensor& cell_coords_table,
+        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);
 
@@ -98,13 +98,13 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
         const at::Tensor& sdfs,
         const at::Tensor& weights,
         // query
-        const at::Tensor& sparse_indices,
+        const at::Tensor& grid_indices,
         // sparse luts
-        const at::Tensor& sparse_coords_table,            // (N, 3)
-        const at::Tensor& sparse_neighbor_indices_table,  // (N, 1)
+        const at::Tensor& grid_coords_table,         // (N, 3)
+        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
         // dense luts
-        const at::Tensor& dense_coords_table,
-        const at::Tensor& dense_neighbor_indices_table,  // (M^3, 8)
-        const int64_t dense_grid_dim,
+        const at::Tensor& cell_coords_table,
+        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
+        const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);
