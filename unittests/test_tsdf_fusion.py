@@ -236,12 +236,13 @@ if __name__ == "__main__":
     triangles, positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=False)
 
     grid = fuser.grid
-    optim = torch.optim.Adam(grid.parameters(), lr=1e-2)
-    for i in range(10):
+    optim = torch.optim.Adam(grid.parameters(), lr=1e-4)
+    for i in range(1000):
         optim.zero_grad()
 
         positions.requires_grad_(True)
         embeddings, masks = grid(positions, interpolation="linear")
+
         dsdf_dx = torch.autograd.grad(
             outputs=embeddings[..., 0],
             inputs=positions,
@@ -255,25 +256,25 @@ if __name__ == "__main__":
         eikonal_loss = ((torch.norm(dsdf_dx, dim=-1) - 1) ** 2).mean()
         print('Eikonal loss:', eikonal_loss.item())
 
-        eikonal_loss.backward(retain_graph=True)
+        eikonal_loss.backward()
         # print(grid.embeddings.grad.shape)
         # print(grid.embeddings.grad[..., 0])
         # print(grid.embeddings.grad[..., 0].abs().mean())
 
-        import torchviz
-        torchviz.make_dot(
-            (eikonal_loss, dsdf_dx, grid.embeddings),
-            params={"eikonal": eikonal_loss, "dsdf_dx": dsdf_dx, "embeddings": grid.embeddings},
-            show_saved=False,
-        ).render("double_grad", format="png")
+        # import torchviz
+        # torchviz.make_dot(
+        #     (eikonal_loss, dsdf_dx, grid.embeddings),
+        #     params={"eikonal": eikonal_lsos, "dsdf_dx": dsdf_dx, "embeddings": grid.embeddings},
+        #     show_saved=False,
+        # ).render("double_grad", format="png")
 
         optim.step()
 
-        colors = embeddings[..., 1:4]
+    colors = embeddings[..., 1:4]
 
-        mesh = o3d.t.geometry.TriangleMesh()
-        mesh.vertex["positions"] = positions.detach().cpu().numpy()
-        mesh.vertex["colors"] = colors.detach().cpu().numpy()
-        mesh.vertex["normals"] = F.normalize(dsdf_dx, dim=-1).detach().cpu().numpy()
-        mesh.triangle["indices"] = triangles.cpu().numpy()
-        o3d.visualization.draw([mesh.to_legacy()])
+    mesh = o3d.t.geometry.TriangleMesh()
+    mesh.vertex["positions"] = positions.detach().cpu().numpy()
+    mesh.vertex["colors"] = colors.detach().cpu().numpy()
+    mesh.vertex["normals"] = F.normalize(dsdf_dx, dim=-1).detach().cpu().numpy()
+    mesh.triangle["indices"] = triangles.cpu().numpy()
+    o3d.visualization.draw([mesh.to_legacy()])
