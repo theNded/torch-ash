@@ -7,6 +7,8 @@ from ash import SparseDenseGrid
 import pytest
 
 
+# TODO: now only 3 dim keys is supported for sparse-dense grids
+# TBD: better defined and general interpolation
 class TestSparseDenseGrid:
     capacity = 100
     device = torch.device("cuda:0")
@@ -36,7 +38,7 @@ class TestSparseDenseGrid:
         )
 
         indices = torch.randint(
-            grid.num_cells_per_grid, (100, in_dim), device=self.device
+            grid.num_cells_per_grid, (100, ), device=self.device
         )
         coords = grid._delinearize_cell_indices(indices)
         indices_linearized = grid._linearize_cell_coords(coords)
@@ -59,13 +61,13 @@ class TestSparseDenseGrid:
         )
         coords = grid._delinearize_cell_indices(indices)
 
-        nb_indices0 = grid.dense_neighbor_indices[indices, 0]
+        nb_indices0 = grid.neighbor_table_cell2cell[indices, 0]
         nb_coords0 = grid._delinearize_cell_indices(nb_indices0)
 
         assert torch.all(nb_indices0 == indices)
         assert torch.all(nb_coords0 == coords)
 
-        nb_indices_last = grid.dense_neighbor_indices[indices, -1]
+        nb_indices_last = grid.neighbor_table_cell2cell[indices, -1]
         nb_coords_last = grid._delinearize_cell_indices(nb_indices_last)
         offset_last = torch.ones_like(nb_coords_last[0])
         nb_coords_last_expected = (coords + offset_last) % grid_dim
@@ -108,7 +110,7 @@ class TestSparseDenseGrid:
         )
         nn.init.uniform_(grid.embeddings, -1, 1)
 
-        sparse_keys = (
+        sparse_keys = grid_dim * (
             torch.arange(-1, 2, 1, dtype=torch.int, device=self.device)
             .view(-1, 1)
             .tile((1, in_dim))
@@ -134,28 +136,28 @@ class TestSparseDenseGrid:
     def test_init(self):
         self._init_block(in_dim=3, embedding_dim=1, grid_dim=4)
         self._init_block(in_dim=3, embedding_dim=5, grid_dim=8)
-        self._init_block(in_dim=4, embedding_dim=2, grid_dim=16)
+        self._init_block(in_dim=3, embedding_dim=2, grid_dim=16)
 
     def test_linearize(self):
-        self._linearize_block(in_dim=2, embedding_dim=1, grid_dim=3)
+        self._linearize_block(in_dim=3, embedding_dim=1, grid_dim=3)
         self._linearize_block(in_dim=3, embedding_dim=1, grid_dim=4)
         self._linearize_block(in_dim=3, embedding_dim=1, grid_dim=8)
-        self._linearize_block(in_dim=4, embedding_dim=1, grid_dim=16)
+        self._linearize_block(in_dim=3, embedding_dim=1, grid_dim=16)
 
     def test_neighbor(self):
-        self._neighbor_block(in_dim=2, embedding_dim=1, grid_dim=2)
         self._neighbor_block(in_dim=3, embedding_dim=1, grid_dim=2)
-        self._neighbor_block(in_dim=2, embedding_dim=8, grid_dim=4)
+        self._neighbor_block(in_dim=3, embedding_dim=1, grid_dim=2)
+        self._neighbor_block(in_dim=3, embedding_dim=8, grid_dim=4)
         self._neighbor_block(in_dim=3, embedding_dim=16, grid_dim=8)
 
     def test_items(self):
-        self._item_block(in_dim=2, embedding_dim=1, grid_dim=2)
         self._item_block(in_dim=3, embedding_dim=1, grid_dim=2)
-        self._item_block(in_dim=2, embedding_dim=8, grid_dim=4)
+        self._item_block(in_dim=3, embedding_dim=1, grid_dim=2)
+        self._item_block(in_dim=3, embedding_dim=8, grid_dim=4)
         self._item_block(in_dim=3, embedding_dim=16, grid_dim=8)
 
     def test_query(self):
-        self._query_block(in_dim=2, embedding_dim=1, grid_dim=2)
+        self._query_block(in_dim=3, embedding_dim=1, grid_dim=2)
         self._query_block(in_dim=3, embedding_dim=1, grid_dim=8)
         self._query_block(in_dim=3, embedding_dim=5, grid_dim=8)
         self._query_block(in_dim=3, embedding_dim=16, grid_dim=8)
