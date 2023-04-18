@@ -215,21 +215,14 @@ class TestSparseDenseGrid:
 
         query_cell_coords.requires_grad_(True)
 
-        def grad_dx_fn(x):
-            embedding, mask = grid(x, interpolation="linear")
-            assert mask.all()
-            return embedding
-
-        def grad_embedding_fn(grid_embedding):
-            x = query_cell_coords.clone()
-            x.requires_grad_(True)
+        def grad_fn(x, grid_embedding):
             x = grid.transform_world_to_cell(x)
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
             grid.construct_sparse_neighbor_tables_()
 
             output = SparseDenseGridQuery.apply(
-                grid.embeddings,
+                grid_embedding,
                 offsets,
                 grid_indices,
                 cell_indices,
@@ -242,10 +235,7 @@ class TestSparseDenseGrid:
             return output
 
         torch.autograd.gradcheck(
-            grad_dx_fn, query_cell_coords, eps=1e-3, atol=1e-2, rtol=1e-2
-        )
-        torch.autograd.gradcheck(
-            grad_embedding_fn, grid.embeddings, eps=1e-3, atol=1e-2, rtol=1e-2
+            grad_fn, (query_cell_coords, grid.embeddings), eps=1e-3, atol=1e-2, rtol=1e-2
         )
 
     def test_init(self):
