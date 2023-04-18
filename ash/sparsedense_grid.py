@@ -14,7 +14,8 @@ Glossary:
 SparseDenseGrid is constructed by:
     - sparse [grids], each of which is a dense array of
     - [cells], whose element number is grid_dim**3
-It is a single-resolution grid but optimized by geometry spatial distribution.
+
+It is a single-resolution grid but allocated by geometry spatial distribution.
 Each cell's embedding is stored separately, and can be accessed by
     embeddings[grid_idx, cell_idx].
 """
@@ -50,27 +51,16 @@ def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Ten
 
 
 class SparseDenseGridQuery(torch.autograd.Function):
-    """Query the embeddings given x defined by offsets, grid_indices, and cell_indices.
-    The overall idea is to compute:
-    y, z = f(x), f'(x)
+    """Interpolate the embeddings.
+    Each query point x can be located in a cell with grid_indices and cell_indices.
+    The offset defined by its relative position to the cell corner gives interpolation ratio in the cell unit.
 
-    y, z = zeros(), zeros()
-    for nb in nbs:
-        feature_nb = embeddings[neighbor_table_grid2grid[grid_indices, sparse_offset(nb)],
-                                neighbor_table_cell2cell[cell_indices, nb]]
-        y += weight(x_offsets[nb]) * feature_nb
-        z += dweight_dx(x_offsets[nb]) * feature_nb
-    return output
-    Args:
-        embeddings: (num_embeddings, num_cells_per_grid, embedding_dim) tensor.
-        grid_indices: (num_x) tensor with sparse indices.
-        cell_indices: (num_x) tensor with dense indices.
-        offsets: (num_x, in_dim) tensor with offsets at the unit of cells, used for interpolation.
-        neighbor_table_grid2grid: (num_embeddings, 8) tensor indices of sparse neighbor grids.
-        neighbor_table_cell2cell: (num_embeddings, 8) tensor indices of dense neighbor cells.
-    Returns:
-        y: (num_x, embedding_dim) tensor. Interpoated embedding.
-        z: (num_x, in_dim, embedding_dim) tensor. Closed-form gradient of feature w.r.t. embedding.
+    Therefore the output is differentiable w.r.t. embeddings and offsets.
+    ----------
+    |     |  |
+    |---->x  |
+    |        |
+    ----------
     """
 
     @staticmethod
@@ -86,6 +76,27 @@ class SparseDenseGridQuery(torch.autograd.Function):
         neighbor_table_cell2grid: torch.Tensor,
         grid_dim: int,
     ) -> torch.Tensor:
+        """Forward pass of the interpolation.
+
+        For simplicity, we only consider a single query point offset of (3,) and its 8 neighbors
+        y = \sum_{i=0}^7 weight(offset)[i] * embeddings[i]
+        Args:
+            embeddings: (num_embeddings, cells_per_grid, embedding_dim) embeddings of the grid [differentiable]
+            offsets: (num_queries, 3) offsets of the input [differentiable]
+
+            grid_indices: (num_queries, 1) grid index of the input
+            cell_indices: (num_queries, 1) cell index of the input
+            masks: (num_queries, 1) mask of the input
+
+            neighbor_table_grid2grid: (num_embeddings, 8) precomputed neighbor table from grid index to grid index
+            neighbor_table_cell2cell: (cells_per_grid, 8) precomputed neighbor table from cell index to cell index
+            neighbor_table_cell2grid: (cells_per_grid, 8) precomputed neighbor table from cell index to grid index
+
+            grid_dim: int cells_per_grid = grid_dim**3
+
+        Returns:
+            y: (num_queries, embedding_dim) interpolated embeddings
+        """
         ctx.save_for_backward(
             embeddings,
             offsets,
@@ -113,8 +124,11 @@ class SparseDenseGridQuery(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, z: torch.Tensor):
-        # z could be all 1 for direct gradient computation
-        # or dLdy for backpropagation
+        """Backward pass of the interpolation.
+        Supports both forward (for explicit gradient computation via autograd.grad)
+        and the conventional backward.
+        Detailed in SparseDenseGridQueryBackward.
+        """
         (
             embeddings,
             offsets,
@@ -126,7 +140,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
-        dLdembedding, dLdoffsets = SparseDenseGridQueryBackward.apply(
+        grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
             z,
             embeddings,
             offsets,
@@ -138,8 +152,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
-        print('backward apply:', dLdembedding[:, 0].abs().mean())
-        return dLdembedding, dLdoffsets, None, None, None, None, None, None, None
+        return grad_embeddings, grad_offsets, None, None, None, None, None, None, None
 
 
 class SparseDenseGridQueryBackward(torch.autograd.Function):
@@ -157,6 +170,32 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         neighbor_table_cell2grid,
         grid_dim,
     ):
+        """Forward pass of the backward function.
+        Args:
+            z: (num_queries, embedding_dim) gradient of the output w.r.t. y
+            z could be the gradient of the loss w.r.t. y, i.e.,
+                output = dL/dy * dy/dembeddings, dL/dy * dy/doffsets
+                       = dL/dembeddings, dL/doffsets
+            z could also be a all-one tensor to get jvp(x), i.e.,
+                output = dy/dembeddings, dy/doffsets
+
+            Since y = \sum_{i=0}^7 weight(offset)[i] * embeddings[i]
+
+            grad_embeddings[i] = z * weight(offset)[i]
+            grad_outputs = (z * embeddings[i]) * grad_weight(offset)[i]
+
+        weight = [(1-x)(1-y)(1-z), x(1-y)(1-z), ..., xyz] (1 x 8)
+        grad_weight = [[-(1-y)(1-z), (1-y)(1-z), ..., yz] (3 x 8)
+                       [-(1-x)(1-z), -x(1-z), ...,    xz]
+                       [-(1-x)(1-y), -x(1-y), ...,    xy]
+        hessian_weight = [[0 1-z 1-y]            [0 z y]  ((3,3) x 8)
+                          [1-z 0 1-x]            [z 0 x]
+                          [1-y 1-x 0], ...,      [y x 0]]
+
+        Returns:
+            grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
+            grad_offsets: (num_queries, 3)
+        """
         ctx.save_for_backward(
             z,
             embeddings,
@@ -170,7 +209,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         )
         ctx.grid_dim = grid_dim
 
-        w1, w2 = backend.query_backward_forward(
+        grad_embeddings, grad_offsets = backend.query_backward_forward(
             z,
             embeddings,
             offsets,
@@ -182,14 +221,35 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
             grid_dim,
         )
-        # w1: dLdembedding, w2: dLdoffsets
 
-        print('bacward forward:', z, w2)
-
-        return w1, w2
+        return grad_embeddings, grad_offsets
 
     @staticmethod
-    def backward(ctx, grad_dLdembedding: torch.Tensor, grad_dLdoffset: torch.Tensor):
+    def backward(ctx, grad_grad_embeddings: torch.Tensor, grad_grad_offsets: torch.Tensor):
+        """Backward pass of the backward function.
+        When a gradient is computed in by the backward's forward pass and used to compute a loss, its gradient
+        need to be properly back propagated back to embeddings and offsets.
+        Args:
+            z: (num_queries, embedding_dim) gradient of the output w.r.t. y
+            grad_grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
+            grad_grad_offsets: (num_queries, 3)
+
+            Let
+                w1 = grad_embeddings[i] = z * weight(offset)[i], grad_w1 = grad_grad_embeddings[i]
+                w2 = grad_offsets = (z * embeddings[i]) * grad_weight(offset)[i], grad_w2 = grad_grad_offsets
+            We know that w1 is not used in the forward pass, so we can safely ignore dL/dw1.
+            Then we have
+                grad_embeddings[i] = grad_w2 * dw1/dembeddings[i]
+                                   = (grad_w2  * grad_weight(offset)[i]) * z => (1, num_embeddings)
+                grad_offsets = grad_w2 * dw2/doffsets
+                             = (z * embeddings[i]) * grad_w2 * hessian_weight(offset)[i] => (1, 3)
+        TODO: at current, grad_offsets are skipped as offsets are not optimized.
+
+        Returns:
+            grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
+            grad_offsets: (num_queries, 3)
+        """
+
         (
             z,
             embeddings,
@@ -203,9 +263,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         ) = ctx.saved_tensors
 
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
-        dLdembedding, dLdoffset = backend.query_backward_backward(
-            grad_dLdembedding,
-            grad_dLdoffset,
+        grad_embeddings, grad_offsets = backend.query_backward_backward(
+            grad_grad_embeddings,
+            grad_grad_offsets,
             z,
             embeddings,
             offsets,
@@ -217,8 +277,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
             ctx.grid_dim,
         )
-        print('backward backward:', z, grad_dLdoffset, dLdembedding[:, 0].abs().mean())
-        return None, dLdembedding, None, None, None, None, None, None, None, None
+        return None, grad_embeddings, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGrid(ASHModule):
@@ -261,7 +320,6 @@ class SparseDenseGrid(ASHModule):
         grid_dim: int,
         device: Optional[Union[str, torch.device]] = torch.device("cpu"),
     ):
-
         assert in_dim == 3, "Only 3D sparse-dense grid is supported for now."
         assert embedding_dim <= 16, "Embedding dim must be <= 16 for now."
 

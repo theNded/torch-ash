@@ -251,22 +251,11 @@ if __name__ == "__main__":
             retain_graph=True,
             only_inputs=True,
         )[0]
-        # print(dsdf_dx)
 
         eikonal_loss = ((torch.norm(dsdf_dx, dim=-1) - 1) ** 2).mean()
         print('Eikonal loss:', eikonal_loss.item())
 
         eikonal_loss.backward()
-        # print(grid.embeddings.grad.shape)
-        # print(grid.embeddings.grad[..., 0])
-        # print(grid.embeddings.grad[..., 0].abs().mean())
-
-        # import torchviz
-        # torchviz.make_dot(
-        #     (eikonal_loss, dsdf_dx, grid.embeddings),
-        #     params={"eikonal": eikonal_lsos, "dsdf_dx": dsdf_dx, "embeddings": grid.embeddings},
-        #     show_saved=False,
-        # ).render("double_grad", format="png")
 
         optim.step()
 
