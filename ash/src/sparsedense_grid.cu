@@ -4,6 +4,7 @@
 #include "minivec.h"
 #include "sparsedense_grid.h"
 
+const float eps = 1e-6;
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
 template <typename scalar_t>
@@ -60,6 +61,10 @@ __global__ void query_forward_kernel(
             sum_output[k] += weight * embeddings[base_idx + k];
         }
         sum_weight += weight;
+    }
+
+    if (sum_weight < eps) {
+        return;
     }
 
     for (int k = 0; k < embedding_dims; ++k) {
@@ -158,7 +163,7 @@ __global__ void query_backward_forward_kernel(
         }
         sum_weight += weight;
     }
-    if (sum_weight == 0) {
+    if (sum_weight < eps) {
         return;
     }
 
@@ -287,12 +292,12 @@ __global__ void query_backward_backward_kernel(
         scalar_t weight = 1.0;
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
             weight *= w;
         }
         sum_weight += weight;
     }
-    if (sum_weight == 0) {
+    if (sum_weight < eps) {
         return;
     }
 
@@ -314,13 +319,15 @@ __global__ void query_backward_backward_kernel(
             weight_grad[2] *= (d == 2) ? dw : w;
         }
         int cell_nb_idx = neighbor_cell2cell[cell_nb];
-        int base_idx =
+        int base_idx_lhs =
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
+        int base_idx_rhs = i * embedding_dims;
 
         scalar_t dot = weight_grad.dot(grad_grad_offset[i]);
+        scalar_t factor = dot / sum_weight;
         for (int k = 0; k < embedding_dims; ++k) {
-            atomicAdd(&grad_embeddings[base_idx + k],
-                      (dot / sum_weight) * z[i * embedding_dims + k]);
+            atomicAdd(&grad_embeddings[base_idx_lhs + k],
+                      factor * z[base_idx_rhs + k]);
         }
     }
 };

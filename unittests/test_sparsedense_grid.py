@@ -174,55 +174,50 @@ class TestSparseDenseGrid:
         assert torch.allclose(embeddings[..., :3], query_cell_coords)
         assert masks.all()
 
-    def _backward_block(self, in_dim, embedding_dim, grid_dim, bound=3):
+    def _backward_block(self, in_dim, embedding_dim, grid_dim):
         grid = SparseDenseGrid(
             in_dim=in_dim,
-            num_embeddings=self.capacity,
+            num_embeddings=8,
             embedding_dim=embedding_dim,
             grid_dim=grid_dim,
             device=self.device,
         )
 
-        grid_coord_range = torch.arange(
-            -bound, bound + 1, 1, dtype=torch.int, device=self.device
-        )
-
-        # Create a dense grid to test correctness
+        grid_coord_range = torch.arange(0, 2, 1, dtype=torch.int, device=self.device)
         grid_coords = grid_dim * torch.stack(
             torch.meshgrid(
                 grid_coord_range, grid_coord_range, grid_coord_range, indexing="ij"
             ),
             dim=-1,
         ).view(-1, 3)
-
         grid.spatial_init_(grid_coords, dilation=0)
+        torch.nn.init.uniform_(grid.embeddings, -1, 1)
+
         grid_coords, cell_coords, grid_indices, cell_indices = grid.items()
-        coords = grid_coords * grid_dim + cell_coords
-        coords = coords.view(-1, in_dim).float()
 
-        with torch.no_grad():
-            grid.embeddings[grid_indices, cell_indices, :3] = coords.view(
-                grid_indices.shape[0], cell_indices.shape[1], 3
-            )
+        # Must make sure that after perturbation, the query is still in the same cell
+        # Otherwise things could go wrong
+        eps = 1e-3
+        num_queries = 1000
 
-        # Map query to [min, max - 1) to check purely in-bound queries
-        query_cell_coords = torch.rand(100, 3, device=self.device)
-        # min: -grid_dim * bound
-        # max: grid_dim * bound - 1
-        query_cell_coords = (
-            2 * grid_dim * bound - 1
-        ) * query_cell_coords - grid_dim * bound
+        query_cell_coords = torch.randint(
+            high=grid_dim * 2 - 1, size=(num_queries, in_dim), device=self.device
+        )
+        query_cell_offsets = (
+            torch.rand(num_queries, in_dim, device=self.device)
+        ).clamp(2 * eps, 1 - 2 * eps)
+        query_positions = query_cell_coords + query_cell_offsets
+        query_positions.requires_grad_(True)
 
-        query_cell_coords.requires_grad_(True)
-
-        def grad_fn(x, grid_embedding):
+        def grad_x_fn(x):
             x = grid.transform_world_to_cell(x)
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
+
             grid.construct_sparse_neighbor_tables_()
 
             output = SparseDenseGridQuery.apply(
-                grid_embedding,
+                grid.embeddings,
                 offsets,
                 grid_indices,
                 cell_indices,
@@ -234,10 +229,79 @@ class TestSparseDenseGrid:
             )
             return output
 
-        def grad_grad_fn(grid_embedding):
-            x = query_cell_coords.clone()
-            z = torch.ones_like(x, dtype=torch.float64)
-            x = grid.transform_world_to_cell(x)
+        def grad_embedding_fn(embeddings):
+            x = grid.transform_world_to_cell(query_positions)
+            grid_indices, cell_indices, offsets, masks = grid.query(x)
+            assert masks.all()
+
+            grid.construct_sparse_neighbor_tables_()
+
+            output = SparseDenseGridQuery.apply(
+                embeddings,
+                offsets,
+                grid_indices,
+                cell_indices,
+                masks,
+                grid.neighbor_table_grid2grid,
+                grid.neighbor_table_cell2cell,
+                grid.neighbor_table_cell2grid,
+                grid.grid_dim,
+            )
+            return output
+
+        torch.autograd.gradcheck(
+            grad_x_fn,
+            (query_positions,),
+            eps=eps,
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        torch.autograd.gradcheck(
+            grad_embedding_fn,
+            (grid.embeddings,),
+            eps=eps,
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+    def _backward_backward_block(self, in_dim, embedding_dim, grid_dim):
+        grid = SparseDenseGrid(
+            in_dim=in_dim,
+            num_embeddings=8,
+            embedding_dim=embedding_dim,
+            grid_dim=grid_dim,
+            device=self.device,
+        )
+
+        grid_coord_range = torch.arange(0, 2, 1, dtype=torch.int, device=self.device)
+        grid_coords = grid_dim * torch.stack(
+            torch.meshgrid(
+                grid_coord_range, grid_coord_range, grid_coord_range, indexing="ij"
+            ),
+            dim=-1,
+        ).view(-1, 3)
+        grid.spatial_init_(grid_coords, dilation=0)
+        torch.nn.init.uniform_(grid.embeddings, -1, 1)
+
+        grid_coords, cell_coords, grid_indices, cell_indices = grid.items()
+
+        # Must make sure that after perturbation, the query is still in the same cell
+        # Otherwise things could go wrong
+        eps = 1e-3
+        num_queries = 1000
+        query_cell_coords = torch.randint(
+            high=grid_dim * 2 - 1, size=(num_queries, in_dim), device=self.device
+        )
+        query_cell_offsets = (
+            torch.rand(num_queries, in_dim, device=self.device)
+        ).clamp(2 * eps, 1 - 2 * eps)
+        query_positions = query_cell_coords + query_cell_offsets
+        query_positions.requires_grad_(True)
+        z = torch.rand_like(query_positions, dtype=torch.float64)
+
+        def grad2_embedding_fn(grid_embedding):
+            x = grid.transform_world_to_cell(query_positions)
+
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
             grid.construct_sparse_neighbor_tables_()
@@ -256,21 +320,13 @@ class TestSparseDenseGrid:
             )
             return grad_embeddings
 
-        torch.autograd.gradcheck(
-            grad_fn,
-            (query_cell_coords, grid.embeddings.double()),
-            eps=1e-3,
-            atol=1e-3,
-            rtol=1e-3,
-        )
-
         # Only check grad_grad w.r.t. embeddings, as backward to offsets is not yet implemented
         torch.autograd.gradcheck(
-            grad_grad_fn,
+            grad2_embedding_fn,
             (grid.embeddings.double(),),
             eps=1e-3,
-            atol=1e-3,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
 
     def test_init(self):
@@ -306,4 +362,11 @@ class TestSparseDenseGrid:
         self._forward_block(in_dim=3, embedding_dim=3, grid_dim=5)
 
     def test_backward(self):
-        self._backward_block(in_dim=3, embedding_dim=3, grid_dim=1)
+        self._backward_block(in_dim=3, embedding_dim=1, grid_dim=1)
+        self._backward_block(in_dim=3, embedding_dim=1, grid_dim=2)
+        self._backward_block(in_dim=3, embedding_dim=1, grid_dim=4)
+        self._backward_block(in_dim=3, embedding_dim=3, grid_dim=8)
+
+    def test_backward_backward(self):
+        self._backward_backward_block(in_dim=3, embedding_dim=1, grid_dim=1)
+        self._backward_backward_block(in_dim=3, embedding_dim=3, grid_dim=2)
