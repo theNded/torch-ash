@@ -5,6 +5,8 @@ from .hashmap import HashMap, HashSet
 from .embedding import HashEmbedding
 from .sparsedense_grid import (
     enumerate_neighbors,
+    SparseDenseGridQuery,
+    SparseDenseGridQueryBackward,
     SparseDenseGrid,
     BoundedSparseDenseGrid,
     UnBoundedSparseDenseGrid,

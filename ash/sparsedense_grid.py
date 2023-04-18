@@ -225,7 +225,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         return grad_embeddings, grad_offsets
 
     @staticmethod
-    def backward(ctx, grad_grad_embeddings: torch.Tensor, grad_grad_offsets: torch.Tensor):
+    def backward(
+        ctx, grad_grad_embeddings: torch.Tensor, grad_grad_offsets: torch.Tensor
+    ):
         """Backward pass of the backward function.
         When a gradient is computed in by the backward's forward pass and used to compute a loss, its gradient
         need to be properly back propagated back to embeddings and offsets.
@@ -464,7 +466,6 @@ class SparseDenseGrid(ASHModule):
     def forward(
         self,
         x: torch.Tensor,
-        compute_grad_x: bool = False,
         interpolation: Literal["nearest", "linear"] = "linear",
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
@@ -484,10 +485,12 @@ class SparseDenseGrid(ASHModule):
         grid_indices, cell_indices, offsets, masks = self.query(x)
 
         if interpolation == "nearest":
-            assert compute_grad_x is False
             return self.embeddings[grid_indices, cell_indices], masks
 
         elif interpolation == "linear":
+            if self.grid_coords is None or self.neighbor_table_grid2grid is None:
+                self.construct_sparse_neighbor_tables_()
+
             features = SparseDenseGridQuery.apply(
                 self.embeddings,
                 offsets,
@@ -557,17 +560,17 @@ class SparseDenseGrid(ASHModule):
         # TODO(wei): optimize for speed if necessary
         points = self.transform_world_to_cell(points)
 
-        sparse_keys = torch.floor(points / self.grid_dim).int()
+        grid_coords = torch.floor(points / self.grid_dim).int()
         neighbor_coord_offsets = enumerate_neighbors(
             self.in_dim, dilation, bidirectional=False
         ).to(self.device)
-        sparse_keys_with_neighbors = (
-            sparse_keys.view(-1, 1, 3) + neighbor_coord_offsets
+        grid_coords_with_neighbors = (
+            grid_coords.view(-1, 1, 3) + neighbor_coord_offsets
         ).view(-1, 3)
 
         # No need to use a huge hash set due to the duplicates
-        hash_set = HashSet(key_dim=3, capacity=len(sparse_keys), device=self.device)
-        hash_set.insert(sparse_keys_with_neighbors)
+        hash_set = HashSet(key_dim=3, capacity=len(grid_coords), device=self.device)
+        hash_set.insert(grid_coords_with_neighbors)
         unique_grid_coords = hash_set.keys()
 
         self.engine.insert_keys(unique_grid_coords)
