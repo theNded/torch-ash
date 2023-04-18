@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import os
-from ash import SparseDenseGrid, SparseDenseGridQuery
+from ash import SparseDenseGrid, SparseDenseGridQuery, SparseDenseGridQueryBackward
 import pytest
 
 
@@ -206,7 +206,7 @@ class TestSparseDenseGrid:
             )
 
         # Map query to [min, max - 1) to check purely in-bound queries
-        query_cell_coords = torch.rand(10, 3, device=self.device)
+        query_cell_coords = torch.rand(100, 3, device=self.device)
         # min: -grid_dim * bound
         # max: grid_dim * bound - 1
         query_cell_coords = (
@@ -234,8 +234,43 @@ class TestSparseDenseGrid:
             )
             return output
 
+        def grad_grad_fn(grid_embedding):
+            x = query_cell_coords.clone()
+            z = torch.ones_like(x, dtype=torch.float64)
+            x = grid.transform_world_to_cell(x)
+            grid_indices, cell_indices, offsets, masks = grid.query(x)
+            assert masks.all()
+            grid.construct_sparse_neighbor_tables_()
+
+            grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
+                z,
+                grid_embedding,
+                offsets,
+                grid_indices,
+                cell_indices,
+                masks,
+                grid.neighbor_table_grid2grid,
+                grid.neighbor_table_cell2cell,
+                grid.neighbor_table_cell2grid,
+                grid.grid_dim,
+            )
+            return grad_embeddings
+
         torch.autograd.gradcheck(
-            grad_fn, (query_cell_coords, grid.embeddings), eps=1e-3, atol=1e-2, rtol=1e-2
+            grad_fn,
+            (query_cell_coords, grid.embeddings.double()),
+            eps=1e-3,
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+        # Only check grad_grad w.r.t. embeddings, as backward to offsets is not yet implemented
+        torch.autograd.gradcheck(
+            grad_grad_fn,
+            (grid.embeddings.double(),),
+            eps=1e-3,
+            atol=1e-3,
+            rtol=1e-3,
         )
 
     def test_init(self):

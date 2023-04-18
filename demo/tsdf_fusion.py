@@ -237,7 +237,7 @@ if __name__ == "__main__":
 
     grid = fuser.grid
     optim = torch.optim.Adam(grid.parameters(), lr=1e-4)
-    for i in range(1000):
+    for i in range(100):
         optim.zero_grad()
 
         positions.requires_grad_(True)
