@@ -4,7 +4,7 @@
 #include "minivec.h"
 #include "sparsedense_grid.h"
 
-const float eps = 1e-6;
+const float interp_sum_weight_eps = 0.5;
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
 template <typename scalar_t>
@@ -40,7 +40,7 @@ __global__ void query_forward_kernel(
 
     // TODO: dispatch or better serialization
     MiniVec<scalar_t, 16> sum_output = MiniVec<scalar_t, 16>::zeros();
-    float sum_weight = 0.0;
+    scalar_t sum_weight = 0.0;
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
@@ -48,7 +48,7 @@ __global__ void query_forward_kernel(
             continue;
         }
 
-        float weight = 1.0;
+        scalar_t weight = 1.0;
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
             weight *= (dim_code) ? (offset[d]) : (1 - offset[d]);
@@ -63,7 +63,7 @@ __global__ void query_forward_kernel(
         sum_weight += weight;
     }
 
-    if (sum_weight < eps) {
+    if (sum_weight < interp_sum_weight_eps) {
         return;
     }
 
@@ -163,7 +163,7 @@ __global__ void query_backward_forward_kernel(
         }
         sum_weight += weight;
     }
-    if (sum_weight < eps) {
+    if (sum_weight < interp_sum_weight_eps) {
         return;
     }
 
@@ -178,8 +178,8 @@ __global__ void query_backward_forward_kernel(
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            float w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            float dw = (dim_code) ? (1) : (-1);
+            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t dw = (dim_code) ? (1) : (-1);
             weight *= w;
 
             weight_grad[0] *= (d == 0) ? dw : w;
@@ -297,7 +297,7 @@ __global__ void query_backward_backward_kernel(
         }
         sum_weight += weight;
     }
-    if (sum_weight < eps) {
+    if (sum_weight < interp_sum_weight_eps) {
         return;
     }
 

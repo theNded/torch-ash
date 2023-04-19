@@ -38,7 +38,7 @@ class RGBDDataset(torch.utils.data.Dataset):
 
     # pixel value / depth_scale = depth in meters
     depth_scale = 1000.0
-    depth_max = 3.0
+    depth_max = 4.0
 
     def __init__(self, path, normalize_scene=True):
         self.path = Path(path)
@@ -72,7 +72,6 @@ class RGBDDataset(torch.utils.data.Dataset):
             self.scale = 2.0 / (np.max(max_vertices - min_vertices) + 3.0)
             self.depth_scale /= self.scale
             self.depth_max *= self.scale
-
             print(f"Normalize scene with scale {self.scale} and center {self.center}m")
 
         extrinsics = []
@@ -80,19 +79,6 @@ class RGBDDataset(torch.utils.data.Dataset):
             pose[:3, 3] = (pose[:3, 3] - self.center) * self.scale
             extrinsics.append(np.linalg.inv(pose))
         self.extrinsics = np.stack(extrinsics)
-
-        # Debug
-        bbox = o3d.geometry.AxisAlignedBoundingBox([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-        bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(bbox)
-
-        camera_linesets = []
-        for extrinsic in self.extrinsics:
-            camera_linesets.append(
-                o3d.geometry.LineSet.create_camera_visualization(
-                    640, 480, self.intrinsic[:3, :3], extrinsic, 0.1
-                )
-            )
-        o3d.visualization.draw([bbox_lineset] + camera_linesets)
 
     def __len__(self):
         return len(self.image_fnames)
@@ -127,7 +113,7 @@ class TSDFFusion:
         if not normalize_scene:
             self.grid = UnBoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=100000,
+                num_embeddings=80000,
                 embedding_dim=5,
                 grid_dim=8,
                 cell_size=voxel_size,
@@ -139,7 +125,7 @@ class TSDFFusion:
         else:
             self.grid = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=100000,
+                num_embeddings=80000,
                 embedding_dim=5,
                 grid_dim=8,
                 sparse_grid_dim=64,
@@ -183,22 +169,6 @@ class TSDFFusion:
             depth_scale,
             depth_max,
         )
-
-        bbox = o3d.geometry.AxisAlignedBoundingBox([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
-        bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(bbox)
-        # o3d.visualization.draw(
-        #     [
-        #         pcd,
-        #         bbox_lineset,
-        #         o3d.geometry.LineSet.create_camera_visualization(
-        #             640,
-        #             480,
-        #             intrinsic[:3, :3].cpu().numpy(),
-        #             extrinsic.cpu().numpy(),
-        #             0.1,
-        #         ),
-        #     ]
-        # )
         if len(pcd.point["positions"]) == 0:
             warnings.warn("No points after unprojection")
             return None
@@ -242,8 +212,22 @@ class TSDFFusion:
         return sdf, rgb, weight
 
     @torch.no_grad()
-    def prune(self, weight_threshold=1):
-        pass
+    def prune_(self, weight_threshold=1):
+        grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
+
+        batch_size = min(1000, len(grid_coords))
+
+        for i in range(0, len(grid_coords), batch_size):
+            grid_coords_batch = grid_coords[i : i + batch_size]
+            grid_indices_batch = grid_indices[i : i + batch_size]
+
+            weight = self.grid.embeddings[grid_indices_batch, cell_indices, 4]
+            mask = weight.mean(dim=1) < weight_threshold
+
+            if mask.sum() > 0:
+                self.grid.engine.erase(grid_coords_batch[mask].squeeze(1))
+                self.grid.embeddings[grid_indices_batch[mask]] = 0
+        self.grid.construct_sparse_neighbor_tables_()
 
     @torch.no_grad()
     def fuse_frame(self, datum):
@@ -266,6 +250,9 @@ class TSDFFusion:
             grid_indices,
             cell_indices,
         ) = self.grid.spatial_init_(points)
+        if len(grid_indices) == 0:
+            return
+
         cell_coords = self.grid.cell_to_world(grid_coords, cell_coords)
 
         # Observation
@@ -298,12 +285,6 @@ class TSDFFusion:
         embedding[..., 1:4] = rgb_updated
         self.grid.embeddings[grid_indices, cell_indices] = embedding
 
-    def marching_cubes(self):
-        triangles, positions = self.grid.marching_cubes()
-        mesh.vertex["positions"] = to_o3d(positions)
-        mesh.triangle["indices"] = to_o3d(triangles)
-        return mesh.to_legacy()
-
 
 if __name__ == "__main__":
     import argparse
@@ -322,20 +303,41 @@ if __name__ == "__main__":
     fuser = TSDFFusion(0.01, args.normalize_scene)
 
     fuser.fuse_dataset(dataset)
+    print(f"hash map size after fusion: {fuser.grid.engine.size()}")
 
     # sdf_fn and weight_fn
+    def color_fn(x):
+        embeddings, masks = fuser.grid(x, interpolation="linear")
+        return embeddings[..., 1:4].contiguous()
+
+    def grad_fn(x):
+        x.requires_grad_(True)
+        embeddings, masks = fuser.grid(x, interpolation="linear")
+
+        grad_x = torch.autograd.grad(
+            outputs=embeddings[..., 0],
+            inputs=x,
+            grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+        return grad_x
+
+    def normal_fn(x):
+        return F.normalize(grad_fn(x), dim=-1).contiguous()
+
     sdf = fuser.grid.embeddings[..., 0].contiguous()
-    weight = fuser.grid.embeddings[..., -1].contiguous()
+    weight = fuser.grid.embeddings[..., 4].contiguous()
+    mesh = fuser.grid.marching_cubes(
+        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn
+    )
+    o3d.visualization.draw(mesh)
+    print(f"sparse grid size before pruning: {fuser.grid.engine.size()}")
+    fuser.prune_(0.5)
+    print(f"sparse grid size after pruning: {fuser.grid.engine.size()}")
 
-    positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=True)
-
-    embeddings, masks = fuser.grid(positions, interpolation="linear")
-    colors = embeddings[..., 1:4]
-    pcd = o3d.t.geometry.PointCloud(positions.cpu().numpy())
-    pcd.point["colors"] = colors.detach().cpu().numpy()
-    o3d.visualization.draw(pcd)
-
-    triangles, positions = fuser.grid.marching_cubes(sdf, weight, vertices_only=False)
+    positions = torch.from_numpy(mesh.vertex["positions"].numpy()).to(fuser.grid.device)
 
     grid = fuser.grid
     optim = torch.optim.Adam(grid.parameters(), lr=1e-4)
@@ -345,29 +347,16 @@ if __name__ == "__main__":
         optim.zero_grad()
 
         positions.requires_grad_(True)
-        embeddings, masks = grid(positions, interpolation="linear")
+        grad_x = grad_fn(positions)
+        norm_grad_x = torch.norm(grad_x, dim=-1)
 
-        dsdf_dx = torch.autograd.grad(
-            outputs=embeddings[..., 0],
-            inputs=positions,
-            grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-
-        eikonal_loss = ((torch.norm(dsdf_dx, dim=-1) - 1) ** 2).mean()
+        eikonal_loss = ((norm_grad_x - 1) ** 2).mean()
         pbar.set_description(f"iteration: {i}, loss: {eikonal_loss.item():.4f}")
 
         eikonal_loss.backward()
-
         optim.step()
 
-    colors = embeddings[..., 1:4]
-
-    mesh = o3d.t.geometry.TriangleMesh()
-    mesh.vertex["positions"] = positions.detach().cpu().numpy()
-    mesh.vertex["colors"] = colors.detach().cpu().numpy()
-    mesh.vertex["normals"] = F.normalize(dsdf_dx, dim=-1).detach().cpu().numpy()
-    mesh.triangle["indices"] = triangles.cpu().numpy()
-    o3d.visualization.draw([mesh.to_legacy()])
+    mesh = fuser.grid.marching_cubes(
+        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn
+    )
+    o3d.visualization.draw(mesh)

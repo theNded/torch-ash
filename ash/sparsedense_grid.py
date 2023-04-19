@@ -550,8 +550,7 @@ class SparseDenseGrid(ASHModule):
         ).view(-1, self.in_dim)
 
     def grids_in_bound(self, grid_coords: torch.Tensor) -> torch.Tensor:
-        """Placeholder for bounded version
-        """
+        """Placeholder for bounded version"""
         return grid_coords
 
     def spatial_init_(self, points: torch.Tensor, dilation: int = 1) -> None:
@@ -654,10 +653,13 @@ class SparseDenseGrid(ASHModule):
         self,
         tsdfs: torch.Tensor,
         weights: torch.Tensor,
+        color_fn: None,
+        normal_fn: None,
         iso_value: float = 0.0,
         weight_thr: float = 1.0,
         vertices_only=False,
     ) -> torch.Tensor:
+        import open3d as o3d
         """Extract isosurface from the grid.
         Args:
             tsdfs: (num_embeddings, num_cells_per_grid) tensor of tsdfs
@@ -689,7 +691,16 @@ class SparseDenseGrid(ASHModule):
                 0.0,
                 1.0,
             )
-            return self.transform_cell_to_world(vertices)
+            positions = self.transform_cell_to_world(vertices)
+
+            pcd = o3d.t.geometry.PointCloud(positions.detach().cpu().numpy())
+            if color_fn is not None:
+                colors = color_fn(positions)
+                pcd.point["colors"] = colors.detach().cpu().numpy()
+            if normal_fn is not None:
+                normals = normal_fn(positions)
+                pcd.point["normals"] = normals.detach().cpu().numpy()
+            return pcd
 
         else:
             triangles, vertices = backend.marching_cubes(
@@ -705,7 +716,17 @@ class SparseDenseGrid(ASHModule):
                 0.0,
                 1.0,
             )
-            return triangles, self.transform_cell_to_world(vertices)
+            positions = self.transform_cell_to_world(vertices)
+            mesh = o3d.t.geometry.TriangleMesh(
+                positions.detach().cpu().numpy(), triangles.detach().cpu().numpy()
+            )
+            if color_fn is not None:
+                colors = color_fn(positions)
+                mesh.vertex["colors"] = colors.detach().cpu().numpy()
+            if normal_fn is not None:
+                normals = normal_fn(positions)
+                mesh.vertex["normals"] = normals.detach().cpu().numpy()
+            return mesh
 
 
 class UnBoundedSparseDenseGrid(SparseDenseGrid):
@@ -796,7 +817,7 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         num_embeddings: int,
         embedding_dim: int,
         grid_dim: int = 8,
-        sparse_grid_dim: int = 512,
+        sparse_grid_dim: int = 128,
         bbox_min: torch.Tensor = torch.zeros(3),
         bbox_max: torch.Tensor = torch.ones(3),
         device: Optional[Union[str, torch.device]] = None,
