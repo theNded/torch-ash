@@ -549,6 +549,11 @@ class SparseDenseGrid(ASHModule):
             + cell_coords.view(1, -1, self.in_dim)
         ).view(-1, self.in_dim)
 
+    def grids_in_bound(self, grid_coords: torch.Tensor) -> torch.Tensor:
+        """Placeholder for bounded version
+        """
+        return grid_coords
+
     def spatial_init_(self, points: torch.Tensor, dilation: int = 1) -> None:
         """Initialize the grid with points in the world coordinate system.
         Args:
@@ -561,6 +566,8 @@ class SparseDenseGrid(ASHModule):
         points = self.transform_world_to_cell(points)
 
         grid_coords = torch.floor(points / self.grid_dim).int()
+        grid_coords = self.grids_in_bound(grid_coords)
+
         neighbor_coord_offsets = enumerate_neighbors(
             self.in_dim, dilation, bidirectional=False
         ).to(self.device)
@@ -572,6 +579,7 @@ class SparseDenseGrid(ASHModule):
         hash_set = HashSet(key_dim=3, capacity=len(grid_coords), device=self.device)
         hash_set.insert(grid_coords_with_neighbors)
         unique_grid_coords = hash_set.keys()
+        unique_grid_coords = self.grids_in_bound(unique_grid_coords)
 
         self.engine.insert_keys(unique_grid_coords)
         grid_indices, masks = self.engine.find(unique_grid_coords)
@@ -700,6 +708,52 @@ class SparseDenseGrid(ASHModule):
             return triangles, self.transform_cell_to_world(vertices)
 
 
+class UnBoundedSparseDenseGrid(SparseDenseGrid):
+    """Create an unbounded sparse-dense grid.
+    This is typically useful when the scene is not known to be bounded before hand.
+    In this case, a unit length for dense cell unit is required.
+
+    Example:
+    For a sparse-dense grid with grid_dim=3 and with dense_cell_unit=1/8,
+    the space will be allocated per initialization.
+    The origin point is adaptive to the input.
+     ____ ____ ____
+    |-3/8|    |-3/8|
+    |-3/8|_ __|-1/8|
+    |    |-2/8|    |
+    |__ _|-2/8|__ _|
+    |    |    |-1/8|
+    |____|____|-1/8|___ ___ ___ ___ ___ ___
+                   |0,0|   |   |0, |   |   |
+                   |___|___|___|3/8|___|___|
+                   |   |1/8|   |   |1/8|   |
+                   |___|1/8|___|___|4/8|___|
+                   |2/8|   |2/8|   |   |2/8|
+                   |0__|___|2/8|___|___|5/8|
+                               |3/8|   |   |
+                               |3/8|___|___|
+                               |   |4/8|   |
+                               |___|___|___|
+                               |   |   |5/8|
+                               |___|___|5/8|
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        num_embeddings: int,
+        embedding_dim: int,
+        grid_dim: int,
+        cell_size: float = 0.01,
+        device: Optional[Union[str, torch.device]] = torch.device("cpu"),
+    ):
+        super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
+
+        self.cell_size = cell_size
+        self.transform_world_to_cell = lambda x: x / self.cell_size
+        self.transform_cell_to_world = lambda x: x * self.cell_size
+
+
 class BoundedSparseDenseGrid(SparseDenseGrid):
     """Create a bounded sparse-dense grid.
     This is typically useful when the scene is known to be bounded before hand.
@@ -750,53 +804,15 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         assert in_dim == 3, "Only 3D is supported now"
         super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
+        self.sparse_grid_dim = sparse_grid_dim
+        self.bbox_min = bbox_min
+        self.bbox_max = bbox_max
+
         self.cell_size = (bbox_max - bbox_min) / (sparse_grid_dim * grid_dim - 1)
         self.transform_world_to_cell = lambda x: (x - bbox_min) / self.cell_size
         self.transform_cell_to_world = lambda x: x * self.cell_size + bbox_min
         # TODO(wei): contraction
 
-
-class UnBoundedSparseDenseGrid(SparseDenseGrid):
-    """Create an unbounded sparse-dense grid.
-    This is typically useful when the scene is not known to be bounded before hand.
-    In this case, a unit length for dense cell unit is required.
-
-    Example:
-    For a sparse-dense grid with grid_dim=3 and with dense_cell_unit=1/8,
-    the space will be allocated per initialization.
-    The origin point is adaptive to the input.
-     ____ ____ ____
-    |-3/8|    |-3/8|
-    |-3/8|_ __|-1/8|
-    |    |-2/8|    |
-    |__ _|-2/8|__ _|
-    |    |    |-1/8|
-    |____|____|-1/8|___ ___ ___ ___ ___ ___
-                   |0,0|   |   |0, |   |   |
-                   |___|___|___|3/8|___|___|
-                   |   |1/8|   |   |1/8|   |
-                   |___|1/8|___|___|4/8|___|
-                   |2/8|   |2/8|   |   |2/8|
-                   |0__|___|2/8|___|___|5/8|
-                               |3/8|   |   |
-                               |3/8|___|___|
-                               |   |4/8|   |
-                               |___|___|___|
-                               |   |   |5/8|
-                               |___|___|5/8|
-    """
-
-    def __init__(
-        self,
-        in_dim: int,
-        num_embeddings: int,
-        embedding_dim: int,
-        grid_dim: int,
-        cell_size: float = 0.01,
-        device: Optional[Union[str, torch.device]] = torch.device("cpu"),
-    ):
-        super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
-
-        self.cell_size = cell_size
-        self.transform_world_to_cell = lambda x: x / self.cell_size
-        self.transform_cell_to_world = lambda x: x * self.cell_size
+    def grids_in_bound(self, grid_coords: torch.Tensor) -> torch.Tensor:
+        masks = ((grid_coords >= 0) * (grid_coords < self.sparse_grid_dim)).all(dim=-1)
+        return grid_coords[masks]
