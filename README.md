@@ -39,7 +39,7 @@ grid = UboundedSparseDenseGrid(in_dim=3,
                                num_embeddings=10000,
                                grid_dim=16, 
                                embedding_dims=8, 
-                               dense_cell_size=0.01)
+                               cell_size=0.01)
 
 # Initialize grids by insertion 
 for points in list_points:

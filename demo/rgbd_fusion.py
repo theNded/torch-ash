@@ -2,10 +2,11 @@ import torch
 import torch.nn.functional as F
 from torch.utils.dlpack import from_dlpack, to_dlpack
 
-from ash import UnBoundedSparseDenseGrid, DotDict, HashSet, enumerate_neighbors
+from ash import UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict
 from pathlib import Path
 import numpy as np
 import cv2
+from tqdm import tqdm
 
 import open3d as o3d
 import open3d.core as o3c
@@ -32,10 +33,14 @@ def get_image_files(path, folders=["image", "color"], exts=["jpg", "png", "pgm"]
     raise ValueError(f"no images found in {path}")
 
 
-class RGBDDataset:
+class RGBDDataset(torch.utils.data.Dataset):
     """Minimal RGBD dataset for testing purposes"""
 
-    def __init__(self, path):
+    # pixel value / depth_scale = depth in meters
+    depth_scale = 1000.0
+    depth_max = 3.0
+
+    def __init__(self, path, normalize_scene=True):
         self.path = Path(path)
 
         self.image_fnames = get_image_files(self.path, folders=["image", "color"])
@@ -56,6 +61,39 @@ class RGBDDataset:
             self.poses
         ), f"{len(self.image_fnames)} != {len(self.poses)}"
 
+        self.bbox_T_world = np.eye(4)
+        min_vertices = self.poses[:, :3, 3].min(axis=0)
+        max_vertices = self.poses[:, :3, 3].max(axis=0)
+
+        self.center = (min_vertices + max_vertices) / 2.0
+        self.scale = 1.0
+
+        if normalize_scene:
+            self.scale = 2.0 / (np.max(max_vertices - min_vertices) + 3.0)
+            self.depth_scale /= self.scale
+            self.depth_max *= self.scale
+
+            print(f"Normalize scene with scale {self.scale} and center {self.center}m")
+
+        extrinsics = []
+        for pose in self.poses:
+            pose[:3, 3] = (pose[:3, 3] - self.center) * self.scale
+            extrinsics.append(np.linalg.inv(pose))
+        self.extrinsics = np.stack(extrinsics)
+
+        # Debug
+        bbox = o3d.geometry.AxisAlignedBoundingBox([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+        bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(bbox)
+
+        camera_linesets = []
+        for extrinsic in self.extrinsics:
+            camera_linesets.append(
+                o3d.geometry.LineSet.create_camera_visualization(
+                    640, 480, self.intrinsic[:3, :3], extrinsic, 0.1
+                )
+            )
+        o3d.visualization.draw([bbox_lineset] + camera_linesets)
+
     def __len__(self):
         return len(self.image_fnames)
 
@@ -63,68 +101,114 @@ class RGBDDataset:
         return {
             "color": cv2.imread(str(self.image_fnames[idx]))[..., ::-1].astype(
                 np.float32
-            ),  # BGR2RGB
+            )
+            / 255.0,  # BGR2RGB
             "depth": cv2.imread(
                 str(self.depth_fnames[idx]), cv2.IMREAD_ANYDEPTH
-            ).astype(np.float32),
+            ).astype(np.float32)
+            / self.depth_scale,
             "intrinsic": self.intrinsic.astype(np.float32),
-            "pose": self.poses[idx].astype(np.float32),
+            "extrinsic": self.extrinsics[idx].astype(np.float32),
+            "depth_scale": self.depth_scale,
+            "depth_max": self.depth_max,
         }
 
 
 class TSDFFusion:
     """Use ASH's hashgrid to generate differentiable sparse-dense grid from RGB + scaled monocular depth prior"""
 
-    depth_scale = 1000.0
-    depth_max = 5.0
     device = torch.device("cuda:0")
 
     def __init__(
         self,
-        voxel_size,
+        voxel_size: float = 0.01,
+        normalize_scene: bool = True,
     ):
-        self.voxel_size = voxel_size
-        self.trunc = 4 * voxel_size
-        self.grid = UnBoundedSparseDenseGrid(
-            in_dim=3,
-            num_embeddings=10000,
-            embedding_dim=5,
-            grid_dim=16,
-            dense_cell_size=voxel_size,
-            device=self.device,
-        )
+        if not normalize_scene:
+            self.grid = UnBoundedSparseDenseGrid(
+                in_dim=3,
+                num_embeddings=100000,
+                embedding_dim=5,
+                grid_dim=8,
+                cell_size=voxel_size,
+                device=self.device,
+            )
+            self.voxel_size = voxel_size
+            print(f"Use original scale scene with metric voxel size {self.voxel_size}m")
+
+        else:
+            self.grid = BoundedSparseDenseGrid(
+                in_dim=3,
+                num_embeddings=100000,
+                embedding_dim=5,
+                grid_dim=8,
+                sparse_grid_dim=64,
+                bbox_min=-1 * torch.ones(3, device=self.device),
+                bbox_max=torch.ones(3, device=self.device),
+                device=self.device,
+            )
+
+            self.voxel_size = self.grid.cell_size[0]
+            print(
+                f"Use normalized scene with non-metric voxel size {self.voxel_size} in bounding box"
+            )
+
+        self.trunc = 4 * self.voxel_size
 
     @torch.no_grad()
     def fuse_dataset(self, dataset):
-        for i in range(len(dataset)):
-            datum = DotDict(dataset[i])
-            # if i > 2:
-            #     break
-            self.fuse_frame(
-                color=torch.from_numpy(datum.color).to(self.device) / 255.0,
-                depth=torch.from_numpy(datum.depth).to(self.device) / self.depth_scale,
-                intrinsic=torch.from_numpy(datum.intrinsic).to(self.device),
-                extrinsic=torch.from_numpy(np.linalg.inv(datum.pose)).to(self.device),
-            )
+        dataloader = torch.utils.data.DataLoader(
+            dataset, batch_size=None, shuffle=False
+        )
+
+        pbar = tqdm(total=len(dataloader))
+        for i, datum in enumerate(dataloader):
+            pbar.update(1)
+            for k, v in datum.items():
+                if isinstance(v, torch.Tensor):
+                    datum[k] = v.to(self.device)
+            datum = DotDict(datum)
+            self.fuse_frame(datum)
 
     @torch.no_grad()
-    def unproject_depth(self, depth, intrinsic, extrinsic):
+    def unproject_depth_to_points(
+        self, depth, intrinsic, extrinsic, depth_scale, depth_max
+    ):
         # Multiply back to make open3d happy
-        depth_im = to_o3d_im(depth * self.depth_scale)
+        depth_im = to_o3d_im(depth * depth_scale)
         pcd = o3d.t.geometry.PointCloud.create_from_depth_image(
             depth_im,
             to_o3d(intrinsic.contiguous().double()),
             to_o3d(extrinsic.contiguous().double()),
-            self.depth_scale,
-            self.depth_max,
+            depth_scale,
+            depth_max,
         )
+
+        bbox = o3d.geometry.AxisAlignedBoundingBox([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+        bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(bbox)
+        # o3d.visualization.draw(
+        #     [
+        #         pcd,
+        #         bbox_lineset,
+        #         o3d.geometry.LineSet.create_camera_visualization(
+        #             640,
+        #             480,
+        #             intrinsic[:3, :3].cpu().numpy(),
+        #             extrinsic.cpu().numpy(),
+        #             0.1,
+        #         ),
+        #     ]
+        # )
         if len(pcd.point["positions"]) == 0:
+            warnings.warn("No points after unprojection")
             return None
         points = from_o3d(pcd.point["positions"])
         return points
 
     @torch.no_grad()
-    def project_points(self, points, intrinsic, extrinsic, color, depth):
+    def project_points_to_rgbd(
+        self, points, intrinsic, extrinsic, color, depth, depth_max
+    ):
         h, w, _ = color.shape
         xyz = points @ extrinsic[:3, :3].t() + extrinsic[:3, 3:].t()
         uvd = xyz @ intrinsic.t()
@@ -149,9 +233,7 @@ class TSDFFusion:
         rgb = color_readings
 
         mask_depth = (
-            (depth_readings > 0)
-            * (depth_readings < self.depth_max)
-            * (sdf >= -self.trunc)
+            (depth_readings > 0) * (depth_readings < depth_max) * (sdf >= -self.trunc)
         )
         sdf[sdf >= self.trunc] = self.trunc
 
@@ -160,10 +242,20 @@ class TSDFFusion:
         return sdf, rgb, weight
 
     @torch.no_grad()
-    def fuse_frame(self, color, depth, intrinsic, extrinsic):
+    def prune(self, weight_threshold=1):
+        pass
+
+    @torch.no_grad()
+    def fuse_frame(self, datum):
         torch.cuda.empty_cache()
 
-        points = self.unproject_depth(depth, intrinsic, extrinsic)
+        points = self.unproject_depth_to_points(
+            datum.depth,
+            datum.intrinsic,
+            datum.extrinsic,
+            datum.depth_scale,
+            datum.depth_max,
+        )
         if points is None:
             return
 
@@ -177,8 +269,13 @@ class TSDFFusion:
         cell_coords = self.grid.cell_to_world(grid_coords, cell_coords)
 
         # Observation
-        sdf, rgb, w = self.project_points(
-            cell_coords, intrinsic, extrinsic, color, depth
+        sdf, rgb, w = self.project_points_to_rgbd(
+            cell_coords,
+            datum.intrinsic,
+            datum.extrinsic,
+            datum.color,
+            datum.depth,
+            datum.depth_max,
         )
 
         # Fusion
@@ -213,12 +310,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
+    parser.add_argument(
+        "--normalize_scene",
+        action="store_true",
+        help="Normalize scene into the [0, 1] bounding box",
+    )
     args = parser.parse_args()
 
     # Load data
-    dataset = RGBDDataset(args.path)
+    dataset = RGBDDataset(args.path, args.normalize_scene)
+    fuser = TSDFFusion(0.01, args.normalize_scene)
 
-    fuser = TSDFFusion(0.01)
     fuser.fuse_dataset(dataset)
 
     # sdf_fn and weight_fn
@@ -237,7 +339,9 @@ if __name__ == "__main__":
 
     grid = fuser.grid
     optim = torch.optim.Adam(grid.parameters(), lr=1e-4)
-    for i in range(100):
+
+    pbar = tqdm(range(100))
+    for i in pbar:
         optim.zero_grad()
 
         positions.requires_grad_(True)
@@ -253,7 +357,7 @@ if __name__ == "__main__":
         )[0]
 
         eikonal_loss = ((torch.norm(dsdf_dx, dim=-1) - 1) ** 2).mean()
-        print('Eikonal loss:', eikonal_loss.item())
+        pbar.set_description(f"iteration: {i}, loss: {eikonal_loss.item():.4f}")
 
         eikonal_loss.backward()
 
