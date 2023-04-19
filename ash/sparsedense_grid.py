@@ -792,11 +792,11 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         num_embeddings: int,
         embedding_dim: int,
         grid_dim: int,
-        dense_cell_size: float = 0.01,
+        cell_size: float = 0.01,
         device: Optional[Union[str, torch.device]] = torch.device("cpu"),
     ):
         super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
-        self.cell_size = dense_cell_size
+        self.cell_size = cell_size
         self.transform_world_to_cell = lambda x: x / self.cell_size
         self.transform_cell_to_world = lambda x: x * self.cell_size
