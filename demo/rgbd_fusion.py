@@ -253,11 +253,11 @@ class TSDFFusion:
         if len(grid_indices) == 0:
             return
 
-        cell_coords = self.grid.cell_to_world(grid_coords, cell_coords)
+        cell_positions = self.grid.cell_to_world(grid_coords, cell_coords)
 
         # Observation
         sdf, rgb, w = self.project_points_to_rgbd(
-            cell_coords,
+            cell_positions,
             datum.intrinsic,
             datum.extrinsic,
             datum.color,
