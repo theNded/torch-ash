@@ -76,7 +76,7 @@ class NeuralPoisson(nn.Module):
             device=device,
         )
         if initialization == "random":
-            nn.init.normal_(self.grid.embeddings)
+            nn.init.normal_(self.grid.embeddings, mean=0.0, std=0.05)
         elif initialization == "zeros":
             nn.init.zeros_(self.grid.embeddings)
         else:
@@ -273,7 +273,9 @@ if __name__ == "__main__":
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--hidden_dim", type=int, default=128)
 
-    parser.add_argument("--initialization", type=str, choices=["random", "zeros"])
+    parser.add_argument(
+        "--initialization", type=str, default="random", choices=["random", "zeros"]
+    )
     args = parser.parse_args()
 
     dataset = PointCloudDataset(args.path)
