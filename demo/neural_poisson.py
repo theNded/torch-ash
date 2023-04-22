@@ -3,6 +3,7 @@ from typing import Tuple
 import argparse
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.dlpack import from_dlpack, to_dlpack
 
@@ -14,11 +15,6 @@ from tqdm import tqdm
 
 import open3d as o3d
 import open3d.core as o3c
-import trimesh
-from skimage import measure
-
-avg_pool_3d = torch.nn.AvgPool3d(2, stride=2)
-upsample = torch.nn.Upsample(scale_factor=2, mode="nearest")
 
 
 class PointCloudDataset(torch.utils.data.Dataset):
@@ -42,12 +38,12 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.center = (min_vertices + max_vertices) / 2.0
         self.scale = 2.0 / (np.max(max_vertices - min_vertices) * 1.1)
 
+        # Normalize the point cloud into [-1, 1] box
         self.positions = (self.positions - self.center) * self.scale
 
         # For visualization
         self.pcd = o3d.t.geometry.PointCloud(self.positions)
         self.pcd.point.normals = self.normals
-        # o3d.visualization.draw_geometries([self.pcd.to_legacy()])
 
     def __len__(self):
         return len(self.positions)
@@ -59,19 +55,34 @@ class PointCloudDataset(torch.utils.data.Dataset):
         }
 
 
-class NeuralPoisson(torch.nn.Module):
-    def __init__(self, grid_resolution, embedding_dim, device=torch.device("cuda:0")):
+class NeuralPoisson(nn.Module):
+    def __init__(
+        self,
+        num_embeddings,
+        embedding_dim,
+        grid_dim,
+        sparse_grid_dim,
+        initialization="random",
+        device=torch.device("cuda:0"),
+    ):
         super().__init__()
 
-        # Directly map from position to density
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=12000,
+            num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
-            grid_dim=8,
-            sparse_grid_dim=grid_resolution,
+            grid_dim=grid_dim,
+            sparse_grid_dim=sparse_grid_dim,
             device=device,
         )
+        if initialization == "random":
+            nn.init.normal_(self.grid.embeddings)
+        elif initialization == "zeros":
+            nn.init.zeros_(self.grid.embeddings)
+        else:
+            raise ValueError(f"Unknown initialization: {initialization}")
+
+        # For visualization
         self.bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(
             o3d.geometry.AxisAlignedBoundingBox([-1, -1, -1], [1, 1, 1])
         )
@@ -107,7 +118,7 @@ class NeuralPoisson(torch.nn.Module):
     def marching_cubes(self, fname):
         def normal_fn(positions):
             positions.requires_grad_(True)
-            density, grad_x, mask = self.forward(positions)
+            sdf, grad_x, mask = self.forward(positions)
             return grad_x
 
         def sdf_fn():
@@ -115,28 +126,22 @@ class NeuralPoisson(torch.nn.Module):
             cell_positions = self.grid.cell_to_world(grid_coords, cell_coords)
             cell_positions = cell_positions.view(grid_coords.shape[0], -1, 3)
 
+            num_embeddings, cells_per_grid, _ = self.grid.embeddings.shape
             sdfs = torch.zeros(
-                self.grid.embeddings.shape[0],
-                self.grid.embeddings.shape[1],
+                num_embeddings,
+                cells_per_grid,
                 1,
                 device=self.grid.embeddings.device,
             )
-            weights = torch.zeros(
-                self.grid.embeddings.shape[0],
-                self.grid.embeddings.shape[1],
-                1,
-                device=self.grid.embeddings.device,
-            )
+            weights = torch.zeros_like(sdfs)
 
             for i in tqdm(range(len(grid_coords))):
                 positions = cell_positions[i]
                 lhs = grid_indices[i]
-                # print(sdfs.shape, sdfs[lhs].shape, self.forward(positions)[0].shape)
+
                 sdf, grad_x, mask = self.forward(positions)
-                sdfs[lhs] = sdf.view(-1, self.grid.embeddings.shape[1], 1).detach()
-                weights[lhs] = 2 * (
-                    mask.view(-1, self.grid.embeddings.shape[1], 1).detach().float()
-                )
+                sdfs[lhs] = sdf.view(-1, cells_per_grid, 1).detach()
+                weights[lhs] = 2 * (mask.view(-1, cells_per_grid, 1).detach().float())
 
             return sdfs, weights
 
@@ -151,58 +156,76 @@ class NeuralPoisson(torch.nn.Module):
         )
         if mesh is not None:
             o3d.io.write_triangle_mesh(fname, mesh.to_legacy())
+        else:
+            print("No mesh found.")
         return mesh
 
 
 class NeuralPoissonPlain(NeuralPoisson):
-    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+    def __init__(
+        self,
+        num_embeddings,
+        grid_dim,
+        sparse_grid_dim,
+        initialization="zeros",
+        device=torch.device("cuda:0"),
+    ):
         super().__init__(
-            grid_resolution=grid_resolution, embedding_dim=1, device=device
+            num_embeddings=num_embeddings,
+            embedding_dim=1,
+            grid_dim=grid_dim,
+            sparse_grid_dim=sparse_grid_dim,
+            initialization=initialization,
+            device=device,
         )
-        torch.nn.init.normal_(self.grid.embeddings)
 
     def forward(
         self, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
-        embedding, mask = self.grid(positions)
+        sdf, mask = self.grid(positions)
 
         grad_x = torch.autograd.grad(
-            outputs=embedding[..., 0],
+            outputs=sdf[..., 0],
             inputs=positions,
-            grad_outputs=torch.ones_like(embedding[..., 0], requires_grad=False),
+            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
         )[0]
 
-        return embedding, grad_x, mask
+        return sdf, grad_x, mask
 
 
 class NeuralPoissonMLP(NeuralPoisson):
-    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+    def __init__(
+        self,
+        num_embeddings,
+        embedding_dim,
+        grid_dim,
+        sparse_grid_dim,
+        initialization="random",
+        num_layers=2,
+        hidden_dim=128,
+        device=torch.device("cuda:0"),
+    ):
         super().__init__(
-            grid_resolution=grid_resolution, embedding_dim=8, device=device
+            num_embeddings=num_embeddings,
+            embedding_dim=embedding_dim,
+            grid_dim=grid_dim,
+            sparse_grid_dim=sparse_grid_dim,
+            initialization=initialization,
+            device=device,
         )
-        torch.nn.init.normal_(self.grid.embeddings)
 
-        lin0 = torch.nn.Linear(8, 32)
-        # torch.nn.init.constant_(lin0.bias, 0.0)
-        # torch.nn.init.constant_(lin0.weight[:, 3:], 0.0)
-        # torch.nn.init.normal_(lin0.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(32))
+        layers = [nn.Linear(embedding_dim, hidden_dim), nn.ReLU()]
+        for _ in range(num_layers - 1):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
+        layers.append(nn.Linear(hidden_dim, 1))
+        # TODO: geometric initialization? necessary?
+        # TODO: skip layers? positional encoding? sin activation?
 
-        lin2 = torch.nn.Linear(32, 32)
-        # torch.nn.init.normal_(
-        #     lin2.weight, mean=-np.sqrt(np.pi) / np.sqrt(32), std=0.0001
-        # )
-        # torch.nn.init.constant_(lin2.bias, 1.0)
-
-        lin3 = torch.nn.Linear(32, 1)
-        # torch.nn.init.normal_(lin3.weight, 0.0, np.sqrt(2) / np.sqrt(1))
-
-        self.mlp = torch.nn.Sequential(
-            lin0, torch.nn.ReLU(), lin2, torch.nn.ReLU(), lin3
-        ).to(device)
+        self.mlp = nn.Sequential(*layers).to(device)
 
     def forward(
         self, positions: torch.Tensor
@@ -227,28 +250,69 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
     parser.add_argument("--model", type=str, default="plain", choices=["plain", "mlp"])
+    parser.add_argument(
+        "--grid_dim",
+        type=int,
+        default=8,
+        help="Locally dense grid dimension, e.g. 8 for 8x8x8",
+    )
+    parser.add_argument(
+        "--sparse_grid_dim",
+        type=int,
+        default=32,
+        help="Sparse grid dimension to split the [-1, 1] box. sparse_grid_dim=32 and grid_dim=8 results in a equivalent 256^3 grid, with embeddings only activated at a subset of 32x32x32 sparse grids",
+    )
+    parser.add_argument(
+        "--num_embeddings",
+        type=int,
+        default=12000,
+        help="expected active sparse voxels in the grid. Worst case: sparse_grid_dim^3",
+    )
+    # Only used for model == mlp, ignored for plain
+    parser.add_argument("--embedding_dim", type=int, default=8)
+    parser.add_argument("--num_layers", type=int, default=2)
+    parser.add_argument("--hidden_dim", type=int, default=128)
+
+    parser.add_argument("--initialization", type=str, choices=["random", "zeros"])
     args = parser.parse_args()
 
     dataset = PointCloudDataset(args.path)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
 
     if args.model == "plain":
-        model = NeuralPoissonPlain(grid_resolution=16)
-    else:
-        model = NeuralPoissonMLP(grid_resolution=16)
-    model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
-    print(model.grid.engine.size())
+        model = NeuralPoissonPlain(
+            args.num_embeddings,
+            args.grid_dim,
+            args.sparse_grid_dim,
+            initialization="zeros",
+            device=torch.device("cuda:0"),
+        )
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9)
+    else:
+        model = NeuralPoissonMLP(
+            args.num_embeddings,
+            args.embedding_dim,
+            args.grid_dim,
+            args.sparse_grid_dim,
+            args.initialization,
+            args.num_layers,
+            args.hidden_dim,
+            device=torch.device("cuda:0"),
+        )
+
+    print(model)
+
+    # activate sparse grids
+    model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
+
+    o3d.visualization.draw(
+        [dataset.pcd, model.bbox_lineset, model.visualize_occupied_cells()]
+    )
+
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     model.marching_cubes("mesh_init.ply")
-    # if mesh is not None:
-    #     o3d.io.write_triangle_mesh(f"mesh_init.ply", mesh.to_legacy())
-
-    # o3d.visualization.draw(
-    #     [model.bbox_lineset, model.visualize_occupied_cells(), dataset.pcd]
-    # )
 
     for epoch in range(20):
         pbar = tqdm(dataloader)
@@ -262,38 +326,42 @@ if __name__ == "__main__":
             sdf, grad_x, mask = model(positions)
 
             loss_surface = sdf[mask].pow(2).mean()
-            loss_surface_normal = 10 * (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
+
+            # TODO: check how SIREN implements this
+            loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
                 (grad_x * normals)[mask].sum(dim=1) - 1
             ).pow(2).mean()
             loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
 
+            # TODO: this sampling is very aggressive and are only in the active grids
+            # Ablation in SIREN to see if this causes the problem
             rand_positions = model.sample_grid(num_samples=int(len(positions)))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
+            # TODO: this is kind of neural poisson but not identical
             loss_rand_sdf = (0.5 - sdf_rand[mask_rand].abs()).pow(2).mean()
             loss_rand_eikonal = (
                 (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
-            loss_rand_normal = (
-                (grad_x_rand - normals)[mask_rand].pow(2).sum(dim=-1).mean()
-            )
-
             loss = (
-                # loss_surface
-                +loss_surface_normal
-                # + loss_surface_eikonal
-                # + loss_rand_sdf
+                loss_surface
+                + loss_surface_normal
+                + loss_surface_eikonal
+                + loss_rand_sdf
                 + loss_rand_eikonal
             )
             loss.backward()
 
             pbar.set_description(
-                f"Total={loss.item():.4f}, surface={loss_surface.item():.4f}, normal={loss_surface_normal.item():.4f}, eikonal={loss_surface_eikonal.item():.4f}, rand_sdf={loss_rand_sdf.item():.4f}, rand_eikonal={loss_rand_eikonal.item():.4f}"
+                f"Total={loss.item():.4f},"
+                f"sdf={loss_surface.item():.4f},"
+                f"normal={loss_surface_normal.item():.4f},"
+                f"eikonal={loss_surface_eikonal.item():.4f},"
+                f"rand_sdf={loss_rand_sdf.item():.4f},"
+                f"rand_eikonal={loss_rand_eikonal.item():.4f}"
             )
             optimizer.step()
 
         scheduler.step()
         model.marching_cubes(f"mesh_{epoch:03d}.ply")
-        # if mesh is not None:
-        #     o3d.io.write_triangle_mesh(f"mesh_{epoch:03d}.ply", mesh.to_legacy())
