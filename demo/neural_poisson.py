@@ -21,115 +21,6 @@ avg_pool_3d = torch.nn.AvgPool3d(2, stride=2)
 upsample = torch.nn.Upsample(scale_factor=2, mode="nearest")
 
 
-def get_surface_sliding(
-    sdf_fn, fname, resolution=100, grid_boundary=[-1.0, 1.0], level=0
-):
-    assert resolution % 512 == 0
-    resN = resolution
-    cropN = 512
-    level = 0
-    N = resN // cropN
-
-    grid_min = [grid_boundary[0], grid_boundary[0], grid_boundary[0]]
-    grid_max = [grid_boundary[1], grid_boundary[1], grid_boundary[1]]
-    xs = np.linspace(grid_min[0], grid_max[0], N + 1)
-    ys = np.linspace(grid_min[1], grid_max[1], N + 1)
-    zs = np.linspace(grid_min[2], grid_max[2], N + 1)
-
-    meshes = []
-    for i in range(N):
-        for j in range(N):
-            for k in range(N):
-                x_min, x_max = xs[i], xs[i + 1]
-                y_min, y_max = ys[j], ys[j + 1]
-                z_min, z_max = zs[k], zs[k + 1]
-
-                x = np.linspace(x_min, x_max, cropN)
-                y = np.linspace(y_min, y_max, cropN)
-                z = np.linspace(z_min, z_max, cropN)
-
-                xx, yy, zz = np.meshgrid(x, y, z, indexing="ij")
-                points = torch.tensor(
-                    np.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T, dtype=torch.float
-                ).cuda()
-
-                def evaluate(points):
-                    z = []
-                    for _, pnts in enumerate(torch.split(points, 100000, dim=0)):
-                        z.append(sdf_fn(pnts))
-                    z = torch.cat(z, axis=0)
-                    return z
-
-                # construct point pyramids
-                points = points.reshape(cropN, cropN, cropN, 3).permute(3, 0, 1, 2)
-                points_pyramid = [points]
-                for _ in range(3):
-                    points = avg_pool_3d(points[None])[0]
-                    points_pyramid.append(points)
-                points_pyramid = points_pyramid[::-1]
-
-                # evalute pyramid with mask
-                mask = None
-                threshold = 2 * (x_max - x_min) / cropN * 8
-                for pid, pts in enumerate(points_pyramid):
-                    coarse_N = pts.shape[-1]
-                    pts = pts.reshape(3, -1).permute(1, 0).contiguous()
-
-                    if mask is None:
-                        pts_sdf = evaluate(pts)
-                    else:
-                        mask = mask.reshape(-1)
-                        pts_to_eval = pts[mask]
-                        # import pdb; pdb.set_trace()
-                        if pts_to_eval.shape[0] > 0:
-                            pts_sdf_eval = evaluate(pts_to_eval.contiguous())
-                            pts_sdf[mask] = pts_sdf_eval
-
-                    if pid < 3:
-                        # update mask
-                        mask = torch.abs(pts_sdf) < threshold
-                        mask = mask.reshape(coarse_N, coarse_N, coarse_N)[None, None]
-                        mask = upsample(mask.float()).bool()
-
-                        pts_sdf = pts_sdf.reshape(coarse_N, coarse_N, coarse_N)[
-                            None, None
-                        ]
-                        pts_sdf = upsample(pts_sdf)
-                        pts_sdf = pts_sdf.reshape(-1)
-
-                    threshold /= 2.0
-
-                z = pts_sdf.detach().cpu().numpy()
-
-                if not (np.min(z) > level or np.max(z) < level):
-                    z = z.astype(np.float32)
-                    try:
-                        verts, faces, normals, values = measure.marching_cubes(
-                            volume=z.reshape(
-                                cropN, cropN, cropN
-                            ),  # .transpose([1, 0, 2]),
-                            level=level,
-                            spacing=(
-                                (x_max - x_min) / (cropN - 1),
-                                (y_max - y_min) / (cropN - 1),
-                                (z_max - z_min) / (cropN - 1),
-                            ),
-                        )
-                        verts = verts + np.array([x_min, y_min, z_min])
-                        meshcrop = trimesh.Trimesh(verts, faces, normals)
-                        # meshcrop.export(f"{i}_{j}_{k}.ply")
-                        meshes.append(meshcrop)
-
-                    except:
-                        continue
-
-    combined = trimesh.util.concatenate(meshes)
-    try:
-        combined.export(fname, "ply")
-    except:
-        print("empty mesh")
-
-
 class PointCloudDataset(torch.utils.data.Dataset):
     """Minimal point cloud dataset for a single point cloud"""
 
@@ -213,31 +104,6 @@ class NeuralPoisson(torch.nn.Module):
         pcd.paint_uniform_color([0.0, 0.0, 1.0])
         return pcd
 
-
-class NeuralPoissonPlain(NeuralPoisson):
-    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
-        super().__init__(
-            grid_resolution=grid_resolution, embedding_dim=1, device=device
-        )
-        torch.nn.init.zeros_(self.grid.embeddings)
-
-    def forward(
-        self, positions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        positions.requires_grad_(True)
-        embedding, mask = self.grid(positions)
-
-        grad_x = torch.autograd.grad(
-            outputs=embedding[..., 0],
-            inputs=positions,
-            grad_outputs=torch.ones_like(embedding[..., 0], requires_grad=False),
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-
-        return embedding, grad_x, mask
-
     def marching_cubes(self, fname):
         def normal_fn(positions):
             positions.requires_grad_(True)
@@ -267,8 +133,10 @@ class NeuralPoissonPlain(NeuralPoisson):
                 lhs = grid_indices[i]
                 # print(sdfs.shape, sdfs[lhs].shape, self.forward(positions)[0].shape)
                 sdf, grad_x, mask = self.forward(positions)
-                sdfs[lhs] = sdf.view(-1, 512, 1).detach()
-                weights[lhs] = mask.view(-1, 512, 1).detach().float()
+                sdfs[lhs] = sdf.view(-1, self.grid.embeddings.shape[1], 1).detach()
+                weights[lhs] = 2 * (
+                    mask.view(-1, self.grid.embeddings.shape[1], 1).detach().float()
+                )
 
             return sdfs, weights
 
@@ -284,6 +152,31 @@ class NeuralPoissonPlain(NeuralPoisson):
         if mesh is not None:
             o3d.io.write_triangle_mesh(fname, mesh.to_legacy())
         return mesh
+
+
+class NeuralPoissonPlain(NeuralPoisson):
+    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+        super().__init__(
+            grid_resolution=grid_resolution, embedding_dim=1, device=device
+        )
+        torch.nn.init.normal_(self.grid.embeddings)
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positions.requires_grad_(True)
+        embedding, mask = self.grid(positions)
+
+        grad_x = torch.autograd.grad(
+            outputs=embedding[..., 0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(embedding[..., 0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        return embedding, grad_x, mask
 
 
 class NeuralPoissonMLP(NeuralPoisson):
@@ -329,50 +222,24 @@ class NeuralPoissonMLP(NeuralPoisson):
 
         return sdf, grad_x, mask
 
-    def marching_cubes(self, fname):
-        def normal_fn(positions):
-            positions.requires_grad_(True)
-            grad_xs = []
-            for i in range(0, len(positions), 10000):
-                sdf, grad_x, mask = self.forward(positions[i : i + 10000])
-                grad_xs.append(grad_x.detach())
-            grad_x = torch.cat(grad_xs, dim=0)
-            return grad_x.contiguous()
-
-        def sdf_fn(positions):
-            positions.requires_grad_(True)
-            sdf, grad_x, mask = self.forward(positions)
-            sdf = sdf.detach()
-            sdf[~mask] = -1.0
-            return sdf.squeeze()
-
-        get_surface_sliding(sdf_fn, fname, resolution=512)
-
-        # mesh = self.grid.marching_cubes(
-        #     tsdfs=sdfs,
-        #     weights=weights,
-        #     color_fn=None,
-        #     normal_fn=normal_fn,
-        #     iso_value=0.0,
-        #     vertices_only=False,
-        #     weight_thr=1.0,
-        # )
-        # return mesh
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
+    parser.add_argument("--model", type=str, default="plain", choices=["plain", "mlp"])
     args = parser.parse_args()
 
     dataset = PointCloudDataset(args.path)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
 
-    model = NeuralPoissonPlain(grid_resolution=64)
+    if args.model == "plain":
+        model = NeuralPoissonPlain(grid_resolution=16)
+    else:
+        model = NeuralPoissonMLP(grid_resolution=16)
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
     print(model.grid.engine.size())
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-1, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     model.marching_cubes("mesh_init.ply")
@@ -395,7 +262,7 @@ if __name__ == "__main__":
             sdf, grad_x, mask = model(positions)
 
             loss_surface = sdf[mask].pow(2).mean()
-            loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
+            loss_surface_normal = 10 * (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
                 (grad_x * normals)[mask].sum(dim=1) - 1
             ).pow(2).mean()
             loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
@@ -403,24 +270,21 @@ if __name__ == "__main__":
             rand_positions = model.sample_grid(num_samples=int(len(positions)))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
-            loss_rand_sdf = (
-                (model.grid.cell_size - sdf_rand[mask_rand].abs()).pow(2).mean()
-            )
+            loss_rand_sdf = (0.5 - sdf_rand[mask_rand].abs()).pow(2).mean()
             loss_rand_eikonal = (
                 (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
-            normals = torch.ones_like(grad_x_rand) * -1
-            loss_rand_normal = (grad_x_rand - normals)[mask_rand].pow(2).sum(
-                dim=-1
-            ).mean() + ((grad_x_rand * normals)[mask_rand].sum(dim=1) - 1).pow(2).mean()
+            loss_rand_normal = (
+                (grad_x_rand - normals)[mask_rand].pow(2).sum(dim=-1).mean()
+            )
 
             loss = (
                 # loss_surface
                 +loss_surface_normal
                 # + loss_surface_eikonal
                 # + loss_rand_sdf
-                # + loss_rand_eikonal
+                + loss_rand_eikonal
             )
             loss.backward()
 
