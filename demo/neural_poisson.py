@@ -61,7 +61,7 @@ class NeuralPoisson(torch.nn.Module):
         # Directly map from position to density
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=10000,
+            num_embeddings=12000,
             embedding_dim=embedding_dim,
             grid_dim=8,
             sparse_grid_dim=grid_resolution,
@@ -148,12 +148,20 @@ class NeuralPoissonMLP(NeuralPoisson):
         )
         torch.nn.init.normal_(self.grid.embeddings)
 
+        lin0 = torch.nn.Linear(8, 32)
+        torch.nn.init.constant_(lin0.bias, 0.0)
+        torch.nn.init.constant_(lin0.weight[:, 3:], 0.0)
+        torch.nn.init.normal_(lin0.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(32))
+
+        lin2 = torch.nn.Linear(32, 32)
+        torch.nn.init.normal_(lin2.weight, mean=-np.sqrt(np.pi) / np.sqrt(32), std=0.0001)
+        torch.nn.init.constant_(lin2.bias, 1.0)
+
+        lin3 = torch.nn.Linear(32, 1)
+        torch.nn.init.normal_(lin3.weight, 0.0, np.sqrt(2) / np.sqrt(1))
+
         self.mlp = torch.nn.Sequential(
-            torch.nn.Linear(8, 32),
-            torch.nn.ReLU(),
-            torch.nn.Linear(32, 32),
-            torch.nn.ReLU(),
-            torch.nn.Linear(32, 1),
+            lin0, torch.nn.ReLU(), lin2, torch.nn.ReLU(), lin3
         ).to(device)
 
     def forward(
@@ -213,16 +221,16 @@ if __name__ == "__main__":
     dataset = PointCloudDataset(args.path)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
 
-    model = NeuralPoissonPlain(grid_resolution=16)
+    model = NeuralPoissonMLP(grid_resolution=16)
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
     print(model.grid.engine.size())
 
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    # mesh = model.marching_cubes()
-    # if mesh is not None:
-    #     o3d.io.write_triangle_mesh(f"mesh_init.ply", mesh.to_legacy())
+    mesh = model.marching_cubes()
+    if mesh is not None:
+        o3d.io.write_triangle_mesh(f"mesh_init.ply", mesh.to_legacy())
 
     # o3d.visualization.draw(
     #     [model.bbox_lineset, model.visualize_occupied_cells(), dataset.pcd]
@@ -241,18 +249,27 @@ if __name__ == "__main__":
 
             loss_surface = 100 * sdf[mask].pow(2).mean()
             loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean()
+            loss_surface_normal = (
+                ((grad_x * normals)[mask].sum(dim=1) - 1).pow(2).mean()
+            )
             loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
 
             rand_positions = model.sample_grid(num_samples=int(len(positions)))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
-            loss_rand_sdf = 100 * (1 - sdf_rand[mask_rand].abs()).pow(2).mean()
-            loss_rand_eikonal = 100 * (
+            loss_rand_sdf = (
+                (model.grid.cell_size - sdf_rand[mask_rand].abs()).pow(2).mean()
+            )
+            loss_rand_eikonal = (
                 (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
             loss = (
-                loss_surface + loss_surface_normal + loss_surface_eikonal + loss_rand_eikonal
+                loss_surface
+                + loss_surface_normal
+                + loss_surface_eikonal
+                + loss_rand_sdf
+                + loss_rand_eikonal
             )
             loss.backward()
 
