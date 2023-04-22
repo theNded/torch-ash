@@ -27,6 +27,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         self.positions = self.pcd.point.positions.numpy().astype(np.float32)
         assert "normals" in self.pcd.point
         self.normals = self.pcd.point.normals.numpy().astype(np.float32)
+        self.normals /= np.linalg.norm(self.normals, axis=1, keepdims=True)
 
         assert len(self.positions) == len(self.normals)
 
@@ -41,6 +42,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         # For visualization
         self.pcd = o3d.t.geometry.PointCloud(self.positions)
         self.pcd.point.normals = self.normals
+        o3d.visualization.draw_geometries([self.pcd.to_legacy()])
 
     def __len__(self):
         return len(self.positions)
@@ -61,7 +63,7 @@ class NeuralPoisson(torch.nn.Module):
             in_dim=3,
             num_embeddings=10000,
             embedding_dim=embedding_dim,
-            grid_dim=16,
+            grid_dim=8,
             sparse_grid_dim=grid_resolution,
             device=device,
         )
@@ -144,8 +146,7 @@ class NeuralPoissonMLP(NeuralPoisson):
         super().__init__(
             grid_resolution=grid_resolution, embedding_dim=8, device=device
         )
-
-        torch.nn.init.uniform_(self.grid.embeddings)
+        torch.nn.init.normal_(self.grid.embeddings)
 
         self.mlp = torch.nn.Sequential(
             torch.nn.Linear(8, 32),
@@ -163,15 +164,45 @@ class NeuralPoissonMLP(NeuralPoisson):
         sdf = self.mlp(embedding)
 
         grad_x = torch.autograd.grad(
-            outputs=sdf[...,0],
+            outputs=sdf[..., 0],
             inputs=positions,
-            grad_outputs=torch.ones_like(sdf[...,0], requires_grad=False),
+            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
         )[0]
 
         return sdf, grad_x, mask
+
+    def marching_cubes(self):
+        def normal_fn(positions):
+            positions.requires_grad_(True)
+            grad_xs = []
+            for i in range(0, len(positions), 10000):
+                sdf, grad_x, mask = self.forward(positions[i : i + 10000])
+                grad_xs.append(grad_x.detach())
+            grad_x = torch.cat(grad_xs, dim=0)
+            return grad_x.contiguous()
+
+        grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
+        cell_positions = self.grid.cell_to_world(grid_coords, cell_coords)
+        sdfs = []
+        for i in range(0, len(cell_positions), 10000):
+            sdfs.append(self.forward(cell_positions[i : i + 10000])[0].detach())
+
+        sdfs = (
+            torch.cat(sdfs, dim=0).view(-1, self.grid.embeddings.shape[1]).contiguous()
+        )
+
+        mesh = self.grid.marching_cubes(
+            tsdfs=sdfs,
+            weights=2 * torch.ones_like(sdfs).contiguous(),
+            color_fn=None,
+            normal_fn=normal_fn,
+            iso_value=0.0,
+            vertices_only=False,
+        )
+        return mesh
 
 
 if __name__ == "__main__":
@@ -182,11 +213,12 @@ if __name__ == "__main__":
     dataset = PointCloudDataset(args.path)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
 
-    model = NeuralPoissonMLP(grid_resolution=64)
+    model = NeuralPoissonPlain(grid_resolution=16)
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
     print(model.grid.engine.size())
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     # mesh = model.marching_cubes()
     # if mesh is not None:
@@ -208,22 +240,28 @@ if __name__ == "__main__":
             sdf, grad_x, mask = model(positions)
 
             loss_surface = 100 * sdf[mask].pow(2).mean()
-            loss_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean()
+            loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean()
+            loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
 
-            rand_positions = model.sample_grid(num_samples=2 * len(positions))
+            rand_positions = model.sample_grid(num_samples=int(len(positions)))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
-            loss_eikonal = (
+
+            loss_rand_sdf = 100 * (1 - sdf_rand[mask_rand].abs()).pow(2).mean()
+            loss_rand_eikonal = 100 * (
                 (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
-            loss = loss_surface + loss_normal + loss_eikonal
+            loss = (
+                loss_surface + loss_surface_normal + loss_surface_eikonal + loss_rand_eikonal
+            )
             loss.backward()
 
             pbar.set_description(
-                f"Total={loss.item():.4f}, surface={loss_surface.item():.4f}, normal={loss_normal.item():.4f}, eikonal={loss_eikonal.item():.4f}"
+                f"Total={loss.item():.4f}, surface={loss_surface.item():.4f}, normal={loss_surface_normal.item():.4f}, eikonal={loss_surface_eikonal.item():.4f}, rand_sdf={loss_rand_sdf.item():.4f}, rand_eikonal={loss_rand_eikonal.item():.4f}"
             )
             optimizer.step()
 
-        # mesh = model.marching_cubes()
-        # if mesh is not None:
-        #     o3d.io.write_triangle_mesh(f"mesh_{epoch:03d}.ply", mesh.to_legacy())
+        scheduler.step()
+        mesh = model.marching_cubes()
+        if mesh is not None:
+            o3d.io.write_triangle_mesh(f"mesh_{epoch:03d}.ply", mesh.to_legacy())
