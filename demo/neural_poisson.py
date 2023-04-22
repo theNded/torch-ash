@@ -16,6 +16,7 @@ from tqdm import tqdm
 import open3d as o3d
 import open3d.core as o3c
 
+from siren import SirenMLP
 
 class PointCloudDataset(torch.utils.data.Dataset):
     """Minimal point cloud dataset for a single point cloud"""
@@ -55,6 +56,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         }
 
 
+
 class NeuralPoisson(nn.Module):
     def __init__(
         self,
@@ -91,7 +93,7 @@ class NeuralPoisson(nn.Module):
     def spatial_init_(self, positions: torch.Tensor):
         self.grid.spatial_init_(positions, dilation=1)
 
-    def sample_grid(self, num_samples=10000):
+    def sample(self, num_samples=10000):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
         grid_sel = torch.randint(
             0, len(grid_coords), (num_samples, 1), device=grid_coords.device
@@ -249,7 +251,7 @@ class NeuralPoissonMLP(NeuralPoisson):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
-    parser.add_argument("--model", type=str, default="plain", choices=["plain", "mlp"])
+    parser.add_argument("--model", type=str, default="plain", choices=["plain", "mlp", "siren"])
     parser.add_argument(
         "--grid_dim",
         type=int,
@@ -290,7 +292,7 @@ if __name__ == "__main__":
             device=torch.device("cuda:0"),
         )
 
-    else:
+    elif args.model == "mlp":
         model = NeuralPoissonMLP(
             args.num_embeddings,
             args.embedding_dim,
@@ -302,16 +304,20 @@ if __name__ == "__main__":
             device=torch.device("cuda:0"),
         )
 
+    else:
+        model = SirenMLP(in_dim=3, out_dim=1, hidden_dim=256, num_layers=3,
+                         device=torch.device("cuda:0"))
+
     print(model)
 
     # activate sparse grids
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
 
-    o3d.visualization.draw(
-        [dataset.pcd, model.bbox_lineset, model.visualize_occupied_cells()]
-    )
+    # o3d.visualization.draw(
+    #     [dataset.pcd, model.bbox_lineset, model.visualize_occupied_cells()]
+    # )
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     model.marching_cubes("mesh_init.ply")
@@ -337,7 +343,7 @@ if __name__ == "__main__":
 
             # TODO: this sampling is very aggressive and are only in the active grids
             # Ablation in SIREN to see if this causes the problem
-            rand_positions = model.sample_grid(num_samples=int(len(positions)))
+            rand_positions = model.sample(num_samples=int(len(positions)))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
             # TODO: this is kind of neural poisson but not identical
