@@ -52,21 +52,19 @@ class PointCloudDataset(torch.utils.data.Dataset):
         }
 
 
-class NeuralPoissonDirect(torch.nn.Module):
-    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+class NeuralPoisson(torch.nn.Module):
+    def __init__(self, grid_resolution, embedding_dim, device=torch.device("cuda:0")):
         super().__init__()
 
         # Directly map from position to density
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=50000,
-            embedding_dim=1,
-            grid_dim=8,
+            num_embeddings=10000,
+            embedding_dim=embedding_dim,
+            grid_dim=16,
             sparse_grid_dim=grid_resolution,
             device=device,
         )
-        torch.nn.init.zeros_(self.grid.embeddings)
-
         self.bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(
             o3d.geometry.AxisAlignedBoundingBox([-1, -1, -1], [1, 1, 1])
         )
@@ -91,23 +89,6 @@ class NeuralPoissonDirect(torch.nn.Module):
         )
         return rand_positions
 
-    def forward(
-        self, positions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        positions.requires_grad_(True)
-        density, mask = self.grid(positions)
-
-        grad_x = torch.autograd.grad(
-            outputs=density[..., 0],
-            inputs=positions,
-            grad_outputs=torch.ones_like(density[..., 0], requires_grad=False),
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-
-        return density, grad_x, mask
-
     @torch.no_grad()
     def visualize_occupied_cells(self):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
@@ -115,6 +96,31 @@ class NeuralPoissonDirect(torch.nn.Module):
         pcd = o3d.t.geometry.PointCloud(cell_positions.cpu().numpy())
         pcd.paint_uniform_color([0.0, 0.0, 1.0])
         return pcd
+
+
+class NeuralPoissonPlain(NeuralPoisson):
+    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+        super().__init__(
+            grid_resolution=grid_resolution, embedding_dim=1, device=device
+        )
+        torch.nn.init.zeros_(self.grid.embeddings)
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positions.requires_grad_(True)
+        embedding, mask = self.grid(positions)
+
+        grad_x = torch.autograd.grad(
+            outputs=embedding[..., 0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(embedding[..., 0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        return embedding, grad_x, mask
 
     def marching_cubes(self):
         def normal_fn(positions):
@@ -133,28 +139,64 @@ class NeuralPoissonDirect(torch.nn.Module):
         return mesh
 
 
+class NeuralPoissonMLP(NeuralPoisson):
+    def __init__(self, grid_resolution, device=torch.device("cuda:0")):
+        super().__init__(
+            grid_resolution=grid_resolution, embedding_dim=8, device=device
+        )
+
+        torch.nn.init.uniform_(self.grid.embeddings)
+
+        self.mlp = torch.nn.Sequential(
+            torch.nn.Linear(8, 32),
+            torch.nn.ReLU(),
+            torch.nn.Linear(32, 32),
+            torch.nn.ReLU(),
+            torch.nn.Linear(32, 1),
+        ).to(device)
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positions.requires_grad_(True)
+        embedding, mask = self.grid(positions)
+        sdf = self.mlp(embedding)
+
+        grad_x = torch.autograd.grad(
+            outputs=sdf[...,0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(sdf[...,0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        return sdf, grad_x, mask
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
     args = parser.parse_args()
 
     dataset = PointCloudDataset(args.path)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=100000, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
 
-    model = NeuralPoissonDirect(grid_resolution=128)
+    model = NeuralPoissonMLP(grid_resolution=64)
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
+    print(model.grid.engine.size())
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    mesh = model.marching_cubes()
-    if mesh is not None:
-        o3d.io.write_triangle_mesh(f"mesh_init.ply", mesh.to_legacy())
+    # mesh = model.marching_cubes()
+    # if mesh is not None:
+    #     o3d.io.write_triangle_mesh(f"mesh_init.ply", mesh.to_legacy())
 
-    o3d.visualization.draw(
-        [model.bbox_lineset, model.visualize_occupied_cells(), dataset.pcd]
-    )
+    # o3d.visualization.draw(
+    #     [model.bbox_lineset, model.visualize_occupied_cells(), dataset.pcd]
+    # )
 
-    for epoch in range(50):
+    for epoch in range(20):
         pbar = tqdm(dataloader)
 
         for batch in pbar:
@@ -171,7 +213,7 @@ if __name__ == "__main__":
             rand_positions = model.sample_grid(num_samples=2 * len(positions))
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
             loss_eikonal = (
-                100 * (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
+                (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
             loss = loss_surface + loss_normal + loss_eikonal
@@ -182,6 +224,6 @@ if __name__ == "__main__":
             )
             optimizer.step()
 
-        mesh = model.marching_cubes()
-        if mesh is not None:
-            o3d.io.write_triangle_mesh(f"mesh_{epoch:03d}.ply", mesh.to_legacy())
+        # mesh = model.marching_cubes()
+        # if mesh is not None:
+        #     o3d.io.write_triangle_mesh(f"mesh_{epoch:03d}.ply", mesh.to_legacy())
