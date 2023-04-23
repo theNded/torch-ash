@@ -18,6 +18,7 @@ import open3d.core as o3c
 
 from siren import SirenMLP
 
+
 class PointCloudDataset(torch.utils.data.Dataset):
     """Minimal point cloud dataset for a single point cloud"""
 
@@ -54,7 +55,6 @@ class PointCloudDataset(torch.utils.data.Dataset):
             "position": self.positions[idx],
             "normal": self.normals[idx],
         }
-
 
 
 class NeuralPoisson(nn.Module):
@@ -281,7 +281,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     dataset = PointCloudDataset(args.path)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=10000, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=25000, shuffle=True)
 
     if args.model == "plain":
         model = NeuralPoissonPlain(
@@ -305,7 +305,7 @@ if __name__ == "__main__":
         )
 
     else:
-        model = SirenMLP(in_dim=3, out_dim=1, hidden_dim=256, num_layers=3,
+        model = SirenMLP(in_dim=3, out_dim=1, hidden_dim=256, num_layers=5,
                          device=torch.device("cuda:0"))
 
     print(model)
@@ -317,7 +317,7 @@ if __name__ == "__main__":
     #     [dataset.pcd, model.bbox_lineset, model.visualize_occupied_cells()]
     # )
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-4, momentum=0.9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     model.marching_cubes("mesh_init.ply")
@@ -337,8 +337,12 @@ if __name__ == "__main__":
 
             # TODO: check how SIREN implements this
             loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
-                (grad_x * normals)[mask].sum(dim=1) - 1
-            ).pow(2).mean()
+                1 - F.cosine_similarity(grad_x[mask], normals[mask], dim=-1)
+            ).mean()
+
+            # loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
+            #     1 - (grad_x * normals)[mask].sum(dim=1)
+            # ).pow(2).mean()
             loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
 
             # TODO: this sampling is very aggressive and are only in the active grids
@@ -347,17 +351,17 @@ if __name__ == "__main__":
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
             # TODO: this is kind of neural poisson but not identical
-            loss_rand_sdf = (0.5 - sdf_rand[mask_rand].abs()).pow(2).mean()
+            loss_rand_sdf = torch.exp(- 1e2 * sdf_rand[mask_rand].abs()).mean()
             loss_rand_eikonal = (
                 (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
             )
 
             loss = (
-                loss_surface
-                + loss_surface_normal
-                + loss_surface_eikonal
-                + loss_rand_sdf
-                + loss_rand_eikonal
+                loss_surface * 3e3
+                + loss_surface_normal * 1e3
+                + loss_surface_eikonal * 5
+                + loss_rand_sdf * 1e2
+                + loss_rand_eikonal * 5
             )
             loss.backward()
 
@@ -371,5 +375,5 @@ if __name__ == "__main__":
             )
             optimizer.step()
 
-        scheduler.step()
+        # scheduler.step()
         model.marching_cubes(f"mesh_{epoch:03d}.ply")
