@@ -4,6 +4,12 @@
 #include "minivec.h"
 #include "sparsedense_grid.h"
 
+__device__ __inline__ float smoothstep_fn(float x) { return x*x*(3 - 2 * x);}
+__device__ __inline__ double smoothstep_fn(double x) { return x*x*(3 - 2 * x);}
+
+__device__ __inline__ double dsmoothstep_dx_fn(double x) { return 6*x*(1 - x);}
+__device__ __inline__ float dsmoothstep_dx_fn(float x) { return 6*x*(1 - x);}
+
 const float interp_sum_weight_eps = 0.5;
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
@@ -51,7 +57,8 @@ __global__ void query_forward_kernel(
         scalar_t weight = 1.0;
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            weight *= (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            weight *= smoothstep_fn(x);
         }
 
         int cell_nb_idx = neighbor_cell2cell[cell_nb];
@@ -158,7 +165,8 @@ __global__ void query_backward_forward_kernel(
         scalar_t weight = 1.0;
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t w = smoothstep_fn(x);
             weight *= w;
         }
         sum_weight += weight;
@@ -178,8 +186,10 @@ __global__ void query_backward_forward_kernel(
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            scalar_t dw = (dim_code) ? (1) : (-1);
+            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t w = smoothstep_fn(x);
+            scalar_t dw = dsmoothstep_dx_fn(x) * ((dim_code) ? 1 : -1);
+
             weight *= w;
 
             weight_grad[0] *= (d == 0) ? dw : w;
@@ -292,8 +302,8 @@ __global__ void query_backward_backward_kernel(
         scalar_t weight = 1.0;
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            weight *= w;
+            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            weight *= smoothstep_fn(x);
         }
         sum_weight += weight;
     }
@@ -311,8 +321,9 @@ __global__ void query_backward_backward_kernel(
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
         for (int d = 0; d < 3; ++d) {
             int dim_code = (cell_nb >> d) & 1;
-            scalar_t w = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            scalar_t dw = (dim_code) ? (1) : (-1);
+            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
+            scalar_t w = smoothstep_fn(x);
+            scalar_t dw = dsmoothstep_dx_fn(x) * ((dim_code) ? 1 : -1);
 
             weight_grad[0] *= (d == 0) ? dw : w;
             weight_grad[1] *= (d == 1) ? dw : w;
