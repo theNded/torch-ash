@@ -1,4 +1,9 @@
 # https://raw.githubusercontent.com/lucidrains/siren-pytorch/master/siren_pytorch/siren_pytorch.py
+import time
+import skimage.measure
+import plyfile
+import numpy as np
+import logging
 import math
 import torch
 from torch import nn
@@ -129,14 +134,6 @@ class SirenNet(nn.Module):
 
 """From the DeepSDF repository https://github.com/facebookresearch/DeepSDF
 """
-#!/usr/bin/env python3
-
-import logging
-import numpy as np
-import plyfile
-import skimage.measure
-import time
-import torch
 
 
 def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=None):
@@ -224,7 +221,7 @@ def convert_sdf_samples_to_ply(
         np.zeros(0),
     )
     try:
-        verts, faces, normals, values = skimage.measure.marching_cubes_lewiner(
+        verts, faces, normals, values = skimage.measure.marching_cubes(
             numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
         )
     except:
@@ -280,6 +277,7 @@ class SirenMLP(nn.Module):
             dim_hidden=hidden_dim,
             dim_out=out_dim,
             num_layers=num_layers,
+            w0=30.0,
         ).to(device)
 
     def forward(self, x):
