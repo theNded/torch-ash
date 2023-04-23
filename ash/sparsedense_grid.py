@@ -660,6 +660,7 @@ class SparseDenseGrid(ASHModule):
         vertices_only=False,
     ) -> torch.Tensor:
         import open3d as o3d
+
         """Extract isosurface from the grid.
         Args:
             tsdfs: (num_embeddings, num_cells_per_grid) tensor of tsdfs
@@ -692,6 +693,8 @@ class SparseDenseGrid(ASHModule):
                 1.0,
             )
             positions = self.transform_cell_to_world(vertices)
+            if len(positions) == 0:
+                return None
 
             pcd = o3d.t.geometry.PointCloud(positions.detach().cpu().numpy())
             if color_fn is not None:
@@ -717,6 +720,9 @@ class SparseDenseGrid(ASHModule):
                 1.0,
             )
             positions = self.transform_cell_to_world(vertices)
+            if len(positions) == 0:
+                return None
+
             mesh = o3d.t.geometry.TriangleMesh(
                 positions.detach().cpu().numpy(), triangles.detach().cpu().numpy()
             )
@@ -818,20 +824,30 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         embedding_dim: int,
         grid_dim: int = 8,
         sparse_grid_dim: int = 128,
-        bbox_min: torch.Tensor = torch.zeros(3),
-        bbox_max: torch.Tensor = torch.ones(3),
+        bbox_min: torch.Tensor = None,
+        bbox_max: torch.Tensor = None,
         device: Optional[Union[str, torch.device]] = None,
     ):
         assert in_dim == 3, "Only 3D is supported now"
         super().__init__(in_dim, num_embeddings, embedding_dim, grid_dim, device)
 
         self.sparse_grid_dim = sparse_grid_dim
-        self.bbox_min = bbox_min
-        self.bbox_max = bbox_max
+        self.bbox_min = (
+            bbox_min.to(self.device)
+            if bbox_min is not None
+            else -1 * torch.ones(3, device=self.device)
+        )
+        self.bbox_max = (
+            bbox_max.to(self.device)
+            if bbox_max is not None
+            else torch.ones(3, device=self.device)
+        )
 
-        self.cell_size = (bbox_max - bbox_min) / (sparse_grid_dim * grid_dim - 1)
-        self.transform_world_to_cell = lambda x: (x - bbox_min) / self.cell_size
-        self.transform_cell_to_world = lambda x: x * self.cell_size + bbox_min
+        self.cell_size = (self.bbox_max - self.bbox_min) / (
+            sparse_grid_dim * grid_dim - 1
+        )
+        self.transform_world_to_cell = lambda x: (x - self.bbox_min) / self.cell_size
+        self.transform_cell_to_world = lambda x: x * self.cell_size + self.bbox_min
         # TODO(wei): contraction
 
     def grids_in_bound(self, grid_coords: torch.Tensor) -> torch.Tensor:
