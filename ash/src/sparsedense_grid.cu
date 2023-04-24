@@ -48,7 +48,21 @@ struct functor_t {
     }
 };
 
+#define DISPATCH_INTERP_FUNCTOR(name, ...)                         \
+    if (name == "Linear") {                                        \
+        using InterpFunctor = LinearFunctor<scalar_t>;             \
+        using DiffInterpFunctor = DiffLinearFunctor<scalar_t>;     \
+        return __VA_ARGS__();                                      \
+    } else if (name == "SmoothStep") {                             \
+        using InterpFunctor = SmoothStepFunctor<scalar_t>;         \
+        using DiffInterpFunctor = DiffSmoothStepFunctor<scalar_t>; \
+        return __VA_ARGS__();                                      \
+    } else {                                                       \
+        AT_ERROR("Unknown interpolation functor: ", "name");       \
+    }
+
 const float kInterpSumWeightThreshold = 0.5;
+
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
 template <typename InterpFunctor, typename scalar_t>
@@ -142,20 +156,21 @@ at::Tensor query_forward(
     at::Tensor output = at::zeros({len, embedding_dims}, embeddings.options());
 
     AT_DISPATCH_FLOATING_TYPES(embeddings.scalar_type(), "query_forward", [&] {
-        using InterpFunctor = SmoothStepFunctor<scalar_t>;
-        query_forward_kernel<InterpFunctor, scalar_t><<<blocks, threads>>>(
-                embeddings.data_ptr<scalar_t>(),
-                static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-                grid_indices.data_ptr<int64_t>(),
-                cell_indices.data_ptr<int64_t>(), masks.data_ptr<bool>(),
-                static_cast<MiniVec<int64_t, 8>*>(
-                        neighbor_table_grid2grid.data_ptr()),
-                static_cast<MiniVec<int64_t, 8>*>(
-                        neighbor_table_cell2cell.data_ptr()),
-                static_cast<MiniVec<int64_t, 8>*>(
-                        neighbor_table_cell2grid.data_ptr()),
-                output.data_ptr<scalar_t>(), grid_dim, num_cells_per_grid,
-                embedding_dims, len);
+        DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+            query_forward_kernel<InterpFunctor, scalar_t><<<blocks, threads>>>(
+                    embeddings.data_ptr<scalar_t>(),
+                    static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                    grid_indices.data_ptr<int64_t>(),
+                    cell_indices.data_ptr<int64_t>(), masks.data_ptr<bool>(),
+                    static_cast<MiniVec<int64_t, 8>*>(
+                            neighbor_table_grid2grid.data_ptr()),
+                    static_cast<MiniVec<int64_t, 8>*>(
+                            neighbor_table_cell2cell.data_ptr()),
+                    static_cast<MiniVec<int64_t, 8>*>(
+                            neighbor_table_cell2grid.data_ptr()),
+                    output.data_ptr<scalar_t>(), grid_dim, num_cells_per_grid,
+                    embedding_dims, len);
+        });
     });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -280,25 +295,27 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_forward_kernel", [&] {
-                using InterpFunctor = SmoothStepFunctor<scalar_t>;
-                using DiffInterpFunctor = DiffSmoothStepFunctor<scalar_t>;
-                query_backward_forward_kernel<InterpFunctor, DiffInterpFunctor,
-                                              scalar_t><<<blocks, threads>>>(
-                        z.data_ptr<scalar_t>(), embeddings.data_ptr<scalar_t>(),
-                        static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-                        grid_indices.data_ptr<int64_t>(),
-                        cell_indices.data_ptr<int64_t>(),
-                        masks.data_ptr<bool>(),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_grid2grid.data_ptr()),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_cell2cell.data_ptr()),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_cell2grid.data_ptr()),
-                        grad_embeddings.data_ptr<scalar_t>(),
-                        static_cast<MiniVec<scalar_t, 3>*>(
-                                grad_offsets.data_ptr()),
-                        grid_dim, num_cells_per_grid, embedding_dims, len);
+                DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+                    query_backward_forward_kernel<
+                            InterpFunctor, DiffInterpFunctor,
+                            scalar_t><<<blocks, threads>>>(
+                            z.data_ptr<scalar_t>(),
+                            embeddings.data_ptr<scalar_t>(),
+                            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                            grid_indices.data_ptr<int64_t>(),
+                            cell_indices.data_ptr<int64_t>(),
+                            masks.data_ptr<bool>(),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_grid2grid.data_ptr()),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_cell2cell.data_ptr()),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_cell2grid.data_ptr()),
+                            grad_embeddings.data_ptr<scalar_t>(),
+                            static_cast<MiniVec<scalar_t, 3>*>(
+                                    grad_offsets.data_ptr()),
+                            grid_dim, num_cells_per_grid, embedding_dims, len);
+                });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -424,28 +441,29 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_backward", [&] {
-                using InterpFunctor = SmoothStepFunctor<scalar_t>;
-                using DiffInterpFunctor = DiffSmoothStepFunctor<scalar_t>;
-                query_backward_backward_kernel<InterpFunctor, DiffInterpFunctor,
-                                               scalar_t><<<blocks, threads>>>(
-                        // unused grad_grad_embeddings.data_ptr<scalar_t>(),
-                        static_cast<MiniVec<scalar_t, 3>*>(
-                                grad_grad_offset.data_ptr()),
-                        z.data_ptr<scalar_t>(),
-                        static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-                        grid_indices.data_ptr<int64_t>(),
-                        cell_indices.data_ptr<int64_t>(),
-                        masks.data_ptr<bool>(),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_grid2grid.data_ptr()),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_cell2cell.data_ptr()),
-                        static_cast<MiniVec<int64_t, 8>*>(
-                                neighbor_table_cell2grid.data_ptr()),
-                        grad_embeddings.data_ptr<scalar_t>(),
-                        static_cast<MiniVec<scalar_t, 3>*>(
-                                grad_offsets.data_ptr()),
-                        grid_dim, num_cells_per_grid, embedding_dims, len);
+                DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+                    query_backward_backward_kernel<
+                            InterpFunctor, DiffInterpFunctor,
+                            scalar_t><<<blocks, threads>>>(
+                            // unused grad_grad_embeddings.data_ptr<scalar_t>(),
+                            static_cast<MiniVec<scalar_t, 3>*>(
+                                    grad_grad_offset.data_ptr()),
+                            z.data_ptr<scalar_t>(),
+                            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
+                            grid_indices.data_ptr<int64_t>(),
+                            cell_indices.data_ptr<int64_t>(),
+                            masks.data_ptr<bool>(),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_grid2grid.data_ptr()),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_cell2cell.data_ptr()),
+                            static_cast<MiniVec<int64_t, 8>*>(
+                                    neighbor_table_cell2grid.data_ptr()),
+                            grad_embeddings.data_ptr<scalar_t>(),
+                            static_cast<MiniVec<scalar_t, 3>*>(
+                                    grad_offsets.data_ptr()),
+                            grid_dim, num_cells_per_grid, embedding_dims, len);
+                });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
