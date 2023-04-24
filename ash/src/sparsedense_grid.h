@@ -15,7 +15,8 @@ at::Tensor query_forward(
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,
         const at::Tensor& neighbor_table_cell2grid,
-        const int64_t grid_dim);
+        const int64_t grid_dim,
+        const std::string& interpolation);
 
 // clang-format off
 // Triggered both in forward (autograd.grad) and backward (loss.backward)
@@ -41,7 +42,8 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
         const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
-        const int64_t grid_dim);
+        const int64_t grid_dim,
+        const std::string& interpolation);
 
 // clang-format off
 // Triggered only in backward call w.r.t. z1=dfdx (loss.backward)
@@ -77,7 +79,8 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
         const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
-        const int64_t grid_dim);
+        const int64_t grid_dim,
+        const std::string& interpolation);
 
 at::Tensor isosurface_extraction(
         const at::Tensor& sdfs,

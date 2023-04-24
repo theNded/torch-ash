@@ -171,7 +171,7 @@ class TestSparseDenseGrid:
         ) * query_cell_coords - grid_dim * bound
 
         embeddings, masks = grid(query_cell_coords, interpolation="linear")
-        # assert torch.allclose(embeddings[..., :3], query_cell_coords)
+        assert torch.allclose(embeddings[..., :3], query_cell_coords)
         assert masks.all()
 
     def _backward_block(self, in_dim, embedding_dim, grid_dim):
@@ -317,6 +317,7 @@ class TestSparseDenseGrid:
                 grid.neighbor_table_cell2cell,
                 grid.neighbor_table_cell2grid,
                 grid.grid_dim,
+                "linear",
             )
             return grad_embeddings
 

@@ -49,16 +49,16 @@ struct functor_t {
 };
 
 #define DISPATCH_INTERP_FUNCTOR(name, ...)                         \
-    if (name == "Linear") {                                        \
+    if (name == "linear") {                                        \
         using InterpFunctor = LinearFunctor<scalar_t>;             \
         using DiffInterpFunctor = DiffLinearFunctor<scalar_t>;     \
         return __VA_ARGS__();                                      \
-    } else if (name == "SmoothStep") {                             \
+    } else if (name == "smooth_step") {                            \
         using InterpFunctor = SmoothStepFunctor<scalar_t>;         \
         using DiffInterpFunctor = DiffSmoothStepFunctor<scalar_t>; \
         return __VA_ARGS__();                                      \
     } else {                                                       \
-        AT_ERROR("Unknown interpolation functor: ", "name");       \
+        AT_ERROR("Unknown interpolation functor: ", name);         \
     }
 
 const float kInterpSumWeightThreshold = 0.5;
@@ -143,7 +143,8 @@ at::Tensor query_forward(
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
         const at::Tensor& neighbor_table_cell2grid,
-        const int64_t grid_dim) {
+        const int64_t grid_dim,
+        const std::string& interpolation) {
     // TODO: wise block-thread unrolling
     const int64_t len = grid_indices.size(0);
 
@@ -156,7 +157,7 @@ at::Tensor query_forward(
     at::Tensor output = at::zeros({len, embedding_dims}, embeddings.options());
 
     AT_DISPATCH_FLOATING_TYPES(embeddings.scalar_type(), "query_forward", [&] {
-        DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+        DISPATCH_INTERP_FUNCTOR(interpolation, [&] {
             query_forward_kernel<InterpFunctor, scalar_t><<<blocks, threads>>>(
                     embeddings.data_ptr<scalar_t>(),
                     static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
@@ -281,7 +282,8 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& neighbor_table_grid2grid,
         const at::Tensor& neighbor_table_cell2cell,
         const at::Tensor& neighbor_table_cell2grid,
-        const int64_t grid_dim) {
+        const int64_t grid_dim,
+        const std::string& interpolation) {
     const int64_t len = grid_indices.size(0);
 
     const int64_t threads = 256;
@@ -295,7 +297,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_forward_kernel", [&] {
-                DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+                DISPATCH_INTERP_FUNCTOR(interpolation, [&] {
                     query_backward_forward_kernel<
                             InterpFunctor, DiffInterpFunctor,
                             scalar_t><<<blocks, threads>>>(
@@ -425,7 +427,8 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
         // dense luts
         const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
         const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
-        const int64_t grid_dim) {
+        const int64_t grid_dim,
+        const std::string& interpolation) {
     const int64_t len = grid_indices.size(0);
 
     const int64_t threads = 256;
@@ -441,7 +444,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_backward", [&] {
-                DISPATCH_INTERP_FUNCTOR("SmoothStep", [&] {
+                DISPATCH_INTERP_FUNCTOR(interpolation, [&] {
                     query_backward_backward_kernel<
                             InterpFunctor, DiffInterpFunctor,
                             scalar_t><<<blocks, threads>>>(
