@@ -75,6 +75,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
         neighbor_table_cell2cell: torch.Tensor,
         neighbor_table_cell2grid: torch.Tensor,
         grid_dim: int,
+        interpolation: Literal["linear", "smooth_step"] = "smooth_step",
     ) -> torch.Tensor:
         """Forward pass of the interpolation.
 
@@ -107,7 +108,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2cell,
             neighbor_table_cell2grid,
         )
+
         ctx.grid_dim = grid_dim
+        ctx.interpolation = interpolation
 
         y = backend.query_forward(
             embeddings,
@@ -119,6 +122,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2cell,
             neighbor_table_cell2grid,
             grid_dim,
+            interpolation,
         )
         return y
 
@@ -151,8 +155,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2cell,
             neighbor_table_cell2grid,
             ctx.grid_dim,
+            ctx.interpolation,
         )
-        return grad_embeddings, grad_offsets, None, None, None, None, None, None, None
+        return grad_embeddings, grad_offsets, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGridQueryBackward(torch.autograd.Function):
@@ -169,6 +174,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         neighbor_table_cell2cell,
         neighbor_table_cell2grid,
         grid_dim,
+            interpolation,
     ):
         """Forward pass of the backward function.
         Args:
@@ -208,6 +214,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
         )
         ctx.grid_dim = grid_dim
+        ctx.interpolation = interpolation
 
         grad_embeddings, grad_offsets = backend.query_backward_forward(
             z,
@@ -220,6 +227,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2cell,
             neighbor_table_cell2grid,
             grid_dim,
+            interpolation,
         )
 
         return grad_embeddings, grad_offsets
@@ -278,8 +286,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2cell,
             neighbor_table_cell2grid,
             ctx.grid_dim,
+            ctx.interpolation,
         )
-        return None, grad_embeddings, None, None, None, None, None, None, None, None
+        return None, grad_embeddings, None, None, None, None, None, None, None, None, None
 
 
 class SparseDenseGrid(ASHModule):
@@ -466,7 +475,7 @@ class SparseDenseGrid(ASHModule):
     def forward(
         self,
         x: torch.Tensor,
-        interpolation: Literal["nearest", "linear"] = "linear",
+        interpolation: Literal["nearest", "linear", "smooth_step"] = "smooth_step",
     ) -> Union[
         Tuple[torch.Tensor, torch.Tensor],
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
@@ -487,7 +496,7 @@ class SparseDenseGrid(ASHModule):
         if interpolation == "nearest":
             return self.embeddings[grid_indices, cell_indices], masks
 
-        elif interpolation == "linear":
+        elif interpolation in ["linear", "smooth_step"]:
             if self.grid_coords is None or self.neighbor_table_grid2grid is None:
                 self.construct_sparse_neighbor_tables_()
 
@@ -501,6 +510,7 @@ class SparseDenseGrid(ASHModule):
                 self.neighbor_table_cell2cell,
                 self.neighbor_table_cell2grid,
                 self.grid_dim,
+                interpolation,
             )
             return features, masks
         else:

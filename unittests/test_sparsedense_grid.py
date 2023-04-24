@@ -317,6 +317,7 @@ class TestSparseDenseGrid:
                 grid.neighbor_table_cell2cell,
                 grid.neighbor_table_cell2grid,
                 grid.grid_dim,
+                "linear",
             )
             return grad_embeddings
 
