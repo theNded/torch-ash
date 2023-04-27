@@ -196,9 +196,9 @@ class NeuralPoissonMultiResMLP(nn.Module):
 
         self.mlp = SirenNet(
             dim_in=3 + 8,
-            dim_hidden=hidden_dim,
+            dim_hidden=128,
             dim_out=1,
-            num_layers=num_layers,
+            num_layers=2,
             w0=30.0,
         ).to(device)
 
@@ -225,13 +225,13 @@ class NeuralPoissonMultiResMLP(nn.Module):
 
     @torch.no_grad()
     def spatial_init_(self, positions):
-        self.grid.spatial_init_(positions)
+        self.grid.spatial_init_(positions, dilation=2)
 
     def forward(
         self, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
-        embedding = self.grid(positions)
+        embedding, mask = self.grid(positions)
         sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
 
         grad_x = torch.autograd.grad(
@@ -243,7 +243,7 @@ class NeuralPoissonMultiResMLP(nn.Module):
             only_inputs=True,
         )[0]
 
-        return sdf, grad_x, torch.ones_like(sdf, dtype=bool, requires_grad=False).squeeze(-1)
+        return sdf, grad_x, mask
 
     def marching_cubes(self, fname):
         def sdf_fn(x):
@@ -486,6 +486,7 @@ if __name__ == "__main__":
         normals = batch["normal"].cuda()
 
         sdf, grad_x, mask = model(positions)
+        # print('surface valid ratio:', mask.sum() / mask.numel())
 
         loss_surface = sdf[mask].abs().mean()
 
@@ -498,6 +499,7 @@ if __name__ == "__main__":
         # Ablation in SIREN to see if this causes the problem
         rand_positions = model.sample(num_samples=int(len(positions)))
         sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
+        # print('off-surface valid ratio:', mask_rand.sum() / mask_rand.numel())
 
         # TODO: this is kind of neural poisson but not identical
         loss_rand_sdf = torch.exp(-1e2 * sdf_rand[mask_rand].abs()).mean()

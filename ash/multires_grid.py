@@ -106,12 +106,17 @@ class BoundedMultiResGrid(nn.Module):
         the empty-space queries directly return zeros.
         """
         features = []
+        masks = None
         for grid in self.grids:
             feature, mask = grid(x)
-            features.append(
-                torch.where(mask.view(-1, 1), feature, torch.zeros_like(feature))
-            )
-        return torch.cat(features, dim=-1)
+            if masks is None:
+                masks = mask
+            else:
+                masks = masks * mask
+            features.append(feature)
+        features = torch.cat(features, dim=-1)
+        features = torch.where(masks.view(-1, 1), features, torch.zeros_like(features))
+        return features, masks
 
     @torch.no_grad()
     def spatial_init_(self, x: torch.Tensor, dilation: int = 1) -> None:

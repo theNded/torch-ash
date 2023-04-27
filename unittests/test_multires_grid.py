@@ -50,7 +50,7 @@ class TestBoundedMultiResGrid:
 
         multires_grid.spatial_init_(points, dilation=0)
 
-        features = multires_grid(points)
+        features, mask = multires_grid(points)
         assert features.shape == (100, 6)
 
     def _backward_backward_block(self):
@@ -69,8 +69,7 @@ class TestBoundedMultiResGrid:
         points = torch.rand(100, 3, device=self.device, requires_grad=True) * 2.0 - 1.0
         multires_grid.spatial_init_(points, dilation=0)
 
-        features = multires_grid(points)
-        assert features.shape == (100, 6)
+        features, masks = multires_grid(points)
 
         pseudo_sdf = torch.matmul(features, torch.rand(6, 1, device=self.device))
         grad_pseudo_sdf = torch.autograd.grad(
