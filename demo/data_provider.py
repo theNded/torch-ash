@@ -100,7 +100,7 @@ class PointCloudDataset(torch.utils.data.Dataset):
         }
 
 
-class ImageDataset:
+class ImageDataset(torch.utils.data.Dataset):
     """Minimal RGBD dataset with known poses
     As a raw data container, the images can be accessed at [i] by image-wise
     - depth: (N, H, W) float32
@@ -125,11 +125,18 @@ class ImageDataset:
     """
 
     # pixel value * depth_scale = depth in meters
-    depth_scale = 1e-3
-    depth_max = 4.0
-
-    def __init__(self, path, normalize_scene=True):
+    def __init__(
+        self,
+        path,
+        depth_scale=1e-3,
+        depth_max=4.0,
+        normalize_scene=True,
+        image_only=False,
+    ):
         self.path = Path(path)
+        self.depth_scale = depth_scale
+        self.depth_max = depth_max
+        self.image_only = image_only
 
         # Load fnames
         self.image_fnames = get_image_files(
@@ -210,6 +217,9 @@ class ImageDataset:
         self.extrinsics = np.stack(extrinsics)
 
         # Generate rays
+        if self.image_only:
+            return
+
         yy, xx = np.meshgrid(np.arange(self.H), np.arange(self.W), indexing="ij")
         yy = yy.flatten()
         xx = xx.flatten()
@@ -258,10 +268,28 @@ class ImageDataset:
                 np.concatenate(self.normals, axis=0).reshape(-1, 3).astype(np.float32)
             )
 
+    def get_image(self, idx):
+        return {
+            "rgb": self.rgb_ims[idx],
+            "depth": self.depth_ims[idx],
+            "depth_scale": self.depth_scale,
+            "depth_max": self.depth_max,
+            "normal": self.normal_ims[idx] if self.normal_ims is not None else None,
+            "pose": self.poses[idx],
+            "extrinsic": self.extrinsics[idx],
+            "intrinsic": self.intrinsic,
+        }
+
     def __len__(self):
         return len(self.rays_d)
 
     def __getitem__(self, idx):
+        if self.image_only:
+            raise RuntimeError(
+                f"Cannot get rays {idx} from image-only dataset. Please use get_image({idx}) for images."
+                f"If you want to use rays, please set image_only=False when creating the dataset."
+            )
+
         view_idx = idx // (self.H * self.W)
         return {
             "view_idx": view_idx,
