@@ -11,6 +11,8 @@ from tqdm import tqdm
 import open3d as o3d
 import open3d.core as o3c
 
+from data_provider import ImageDataset, Dataloader
+
 
 def to_o3d(tensor):
     return o3c.Tensor.from_dlpack(to_dlpack(tensor))
@@ -22,82 +24,6 @@ def from_o3d(tensor):
 
 def to_o3d_im(tensor):
     return o3d.t.geometry.Image(to_o3d(tensor))
-
-
-def get_image_files(path, folders=["image", "color"], exts=["jpg", "png", "pgm"]):
-    for folder in folders:
-        for ext in exts:
-            image_fnames = sorted((path / folder).glob(f"*.{ext}"))
-            if len(image_fnames) > 0:
-                return image_fnames
-    raise ValueError(f"no images found in {path}")
-
-
-class RGBDDataset(torch.utils.data.Dataset):
-    """Minimal RGBD dataset for testing purposes"""
-
-    # pixel value / depth_scale = depth in meters
-    depth_scale = 1000.0
-    depth_max = 4.0
-
-    def __init__(self, path, normalize_scene=True):
-        self.path = Path(path)
-
-        self.image_fnames = get_image_files(self.path, folders=["image", "color"])
-        self.depth_fnames = get_image_files(self.path, folders=["depth"])
-        self.poses = (
-            np.loadtxt(self.path / "poses.txt").reshape((-1, 4, 4)).astype(np.float32)
-        )
-        self.intrinsic = (
-            np.loadtxt(self.path / "intrinsic_depth.txt")
-            .reshape((3, 3))
-            .astype(np.float32)
-        )
-
-        assert len(self.image_fnames) == len(
-            self.depth_fnames
-        ), f"{len(self.image_fnames)} != {len(self.depth_fnames)}"
-        assert len(self.image_fnames) == len(
-            self.poses
-        ), f"{len(self.image_fnames)} != {len(self.poses)}"
-
-        self.bbox_T_world = np.eye(4)
-        min_vertices = self.poses[:, :3, 3].min(axis=0)
-        max_vertices = self.poses[:, :3, 3].max(axis=0)
-
-        self.center = (min_vertices + max_vertices) / 2.0
-        self.scale = 1.0
-
-        if normalize_scene:
-            self.scale = 2.0 / (np.max(max_vertices - min_vertices) + 3.0)
-            self.depth_scale /= self.scale
-            self.depth_max *= self.scale
-            print(f"Normalize scene with scale {self.scale} and center {self.center}m")
-
-        extrinsics = []
-        for pose in self.poses:
-            pose[:3, 3] = (pose[:3, 3] - self.center) * self.scale
-            extrinsics.append(np.linalg.inv(pose))
-        self.extrinsics = np.stack(extrinsics)
-
-    def __len__(self):
-        return len(self.image_fnames)
-
-    def __getitem__(self, idx):
-        return {
-            "color": cv2.imread(str(self.image_fnames[idx]))[..., ::-1].astype(
-                np.float32
-            )
-            / 255.0,  # BGR2RGB
-            "depth": cv2.imread(
-                str(self.depth_fnames[idx]), cv2.IMREAD_ANYDEPTH
-            ).astype(np.float32)
-            / self.depth_scale,
-            "intrinsic": self.intrinsic.astype(np.float32),
-            "extrinsic": self.extrinsics[idx].astype(np.float32),
-            "depth_scale": self.depth_scale,
-            "depth_max": self.depth_max,
-        }
 
 
 class TSDFFusion:
@@ -113,9 +39,9 @@ class TSDFFusion:
         if not normalize_scene:
             self.grid = UnBoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=80000,
+                num_embeddings=80000,  # TODO: make this configurable
                 embedding_dim=5,
-                grid_dim=8,
+                grid_dim=8,  # TODO: make this configurable
                 cell_size=voxel_size,
                 device=self.device,
             )
@@ -143,17 +69,13 @@ class TSDFFusion:
 
     @torch.no_grad()
     def fuse_dataset(self, dataset):
-        dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=None, shuffle=False
-        )
-
-        pbar = tqdm(total=len(dataloader))
-        for i, datum in enumerate(dataloader):
-            pbar.update(1)
+        pbar = tqdm(range(dataset.num_images))
+        for i in pbar:
+            pbar.set_description(f"Fuse frame {i}")
+            datum = DotDict(dataset.get_image(i))
             for k, v in datum.items():
-                if isinstance(v, torch.Tensor):
-                    datum[k] = v.to(self.device)
-            datum = DotDict(datum)
+                if isinstance(v, np.ndarray):
+                    datum[k] = torch.from_numpy(v.astype(np.float32)).to(self.device)
             self.fuse_frame(datum)
 
     @torch.no_grad()
@@ -232,12 +154,13 @@ class TSDFFusion:
     @torch.no_grad()
     def fuse_frame(self, datum):
         torch.cuda.empty_cache()
+        datum.depth *= datum.depth_scale
 
         points = self.unproject_depth_to_points(
             datum.depth,
             datum.intrinsic,
             datum.extrinsic,
-            datum.depth_scale,
+            1.0 / datum.depth_scale,  # open3d uses inverse depth scale
             datum.depth_max,
         )
         if points is None:
@@ -260,7 +183,7 @@ class TSDFFusion:
             cell_positions,
             datum.intrinsic,
             datum.extrinsic,
-            datum.color,
+            datum.rgb,
             datum.depth,
             datum.depth_max,
         )
@@ -292,6 +215,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
     parser.add_argument(
+        "--depth_scale",
+        type=float,
+        default=1e-3,
+        help="scale from depth pixel value to meters",
+    )
+    parser.add_argument(
+        "--depth_max",
+        type=float,
+        default=4.0,
+        help="max depth value to truncate in meters",
+    )
+    parser.add_argument(
         "--normalize_scene",
         action="store_true",
         help="Normalize scene into the [0, 1] bounding box",
@@ -299,7 +234,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Load data
-    dataset = RGBDDataset(args.path, args.normalize_scene)
+    dataset = ImageDataset(
+        args.path,
+        depth_scale=args.depth_scale,
+        depth_max=args.depth_max,
+        normalize_scene=args.normalize_scene,
+        image_only=True,
+    )
     fuser = TSDFFusion(0.01, args.normalize_scene)
 
     fuser.fuse_dataset(dataset)
@@ -319,8 +260,6 @@ if __name__ == "__main__":
             inputs=x,
             grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
             create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
         )[0]
         return grad_x
 

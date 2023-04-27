@@ -140,7 +140,7 @@ def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=No
     start = time.time()
     ply_filename = filename
 
-    decoder.eval()
+    # decoder.eval()
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     voxel_origin = [-1, -1, -1]
