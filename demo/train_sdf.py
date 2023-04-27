@@ -7,7 +7,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.dlpack import from_dlpack, to_dlpack
 
-from ash import UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict
+from ash import (
+    UnBoundedSparseDenseGrid,
+    BoundedSparseDenseGrid,
+    DotDict,
+    BoundedMultiResGrid,
+)
 from pathlib import Path
 import numpy as np
 import cv2
@@ -165,6 +170,89 @@ class NeuralPoissonPlain(NeuralPoisson):
         return sdf, grad_x, mask
 
 
+class NeuralPoissonMultiResMLP(nn.Module):
+    def __init__(
+        self,
+        num_embeddings,
+        embedding_dim,
+        grid_dim,
+        sparse_grid_dim,
+        initialization="random",
+        num_layers=2,
+        hidden_dim=128,
+        device=torch.device("cuda:0"),
+    ):
+        super().__init__()
+        self.grid = BoundedMultiResGrid(
+            in_dim=3,
+            num_embeddings=[512, 2048, 8196, 32768],
+            embedding_dims=2,
+            grid_dims=2,
+            sparse_grid_dims=[8, 16, 32, 64],
+            bbox_min=-1 * torch.ones(3, device=device),
+            bbox_max=1 * torch.ones(3, device=device),
+            device=device,
+        )
+
+        self.mlp = SirenNet(
+            dim_in=3 + 8,
+            dim_hidden=128,
+            dim_out=1,
+            num_layers=2,
+            w0=30.0,
+        ).to(device)
+
+        self.bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(
+            o3d.geometry.AxisAlignedBoundingBox([-1, -1, -1], [1, 1, 1])
+        )
+
+
+    # @override
+    def sample(self, num_samples):
+
+        sample_coords = np.random.uniform(-1, 1, size=(num_samples, 3))
+        return torch.from_numpy(sample_coords).float().cuda()
+
+    def visualize_occupied_cells(self):
+        pcds = []
+        for grid in self.grid.grids:
+            grid_coords, cell_coords, grid_indices, cell_indices = grid.items()
+            cell_positions = grid.cell_to_world(grid_coords, cell_coords)
+            pcd = o3d.t.geometry.PointCloud(cell_positions.cpu().numpy())
+            pcd.paint_uniform_color(np.random.rand(3))
+            pcds.append(pcd)
+        return pcds
+
+    @torch.no_grad()
+    def spatial_init_(self, positions):
+        self.grid.spatial_init_(positions, dilation=2)
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positions.requires_grad_(True)
+        embedding, mask = self.grid(positions)
+        sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
+
+        grad_x = torch.autograd.grad(
+            outputs=sdf[..., 0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        return sdf, grad_x, mask
+
+    def marching_cubes(self, fname):
+        def sdf_fn(x):
+            sdf, grad_x, mask = self.forward(x)
+            return sdf.detach()
+
+        create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
+
+
 class NeuralPoissonMLP(NeuralPoisson):
     def __init__(
         self,
@@ -298,7 +386,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
     parser.add_argument(
-        "--model", type=str, default="plain", choices=["plain", "mlp", "siren", "ngp"]
+        "--model", type=str, default="plain", choices=["plain", "mlp", "multires-mlp", "siren", "ngp"]
     )
     parser.add_argument(
         "--grid_dim",
@@ -340,6 +428,18 @@ if __name__ == "__main__":
             device=torch.device("cuda:0"),
         )
 
+    elif args.model == "multires-mlp":
+        model = NeuralPoissonMultiResMLP(
+            args.num_embeddings,
+            args.embedding_dim,
+            args.grid_dim,
+            args.sparse_grid_dim,
+            args.initialization,
+            args.num_layers,
+            args.hidden_dim,
+            device=torch.device("cuda:0"),
+        )
+
     elif args.model == "mlp":
         model = NeuralPoissonMLP(
             args.num_embeddings,
@@ -367,8 +467,8 @@ if __name__ == "__main__":
     # activate sparse grids
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
 
-    # o3d.visualization.draw(
-    #     [dataset.pcd, model.bbox_lineset, model.visualize_occupied_cells()]
+    o3d.visualization.draw(
+        [dataset.pcd, model.bbox_lineset] + model.visualize_occupied_cells())
     # )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -386,6 +486,7 @@ if __name__ == "__main__":
         normals = batch["normal"].cuda()
 
         sdf, grad_x, mask = model(positions)
+        # print('surface valid ratio:', mask.sum() / mask.numel())
 
         loss_surface = sdf[mask].abs().mean()
 
@@ -398,6 +499,7 @@ if __name__ == "__main__":
         # Ablation in SIREN to see if this causes the problem
         rand_positions = model.sample(num_samples=int(len(positions)))
         sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
+        # print('off-surface valid ratio:', mask_rand.sum() / mask_rand.numel())
 
         # TODO: this is kind of neural poisson but not identical
         loss_rand_sdf = torch.exp(-1e2 * sdf_rand[mask_rand].abs()).mean()

@@ -11,7 +11,7 @@ from .sparsedense_grid import (
     BoundedSparseDenseGrid,
     UnBoundedSparseDenseGrid,
 )
-from .multires_grid import MultiResGrid
+from .multires_grid import BoundedMultiResGrid, UnBoundedMultiResGrid
 
 from .marching_cubes import marching_cubes
 
