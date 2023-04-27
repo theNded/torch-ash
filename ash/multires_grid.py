@@ -108,7 +108,6 @@ class BoundedMultiResGrid(nn.Module):
         features = []
         for grid in self.grids:
             feature, mask = grid(x)
-            print(feature.shape, mask.shape)
             features.append(
                 torch.where(mask.view(-1, 1), feature, torch.zeros_like(feature))
             )
