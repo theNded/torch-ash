@@ -16,7 +16,9 @@ from tqdm import tqdm
 import open3d as o3d
 import open3d.core as o3c
 
-from siren import SirenMLP
+from siren import SirenMLP, SirenNet, create_mesh
+
+import tinycudann as tcnn
 
 
 class PointCloudDataset(torch.utils.data.Dataset):
@@ -91,7 +93,7 @@ class NeuralPoisson(nn.Module):
 
     @torch.no_grad()
     def spatial_init_(self, positions: torch.Tensor):
-        self.grid.spatial_init_(positions, dilation=1)
+        self.grid.spatial_init_(positions, dilation=0)
 
     def sample(self, num_samples=10000):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
@@ -169,7 +171,7 @@ class NeuralPoissonPlain(NeuralPoisson):
         num_embeddings,
         grid_dim,
         sparse_grid_dim,
-        initialization="zeros",
+        initialization="random",
         device=torch.device("cuda:0"),
     ):
         super().__init__(
@@ -220,21 +222,31 @@ class NeuralPoissonMLP(NeuralPoisson):
             device=device,
         )
 
-        layers = [nn.Linear(embedding_dim, hidden_dim), nn.ReLU()]
-        for _ in range(num_layers - 1):
-            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
-        layers.append(nn.Linear(hidden_dim, 1))
-        # TODO: geometric initialization? necessary?
-        # TODO: skip layers? positional encoding? sin activation?
+        self.mlp = SirenNet(
+            dim_in=3 + embedding_dim,
+            dim_hidden=hidden_dim,
+            dim_out=1,
+            num_layers=num_layers,
+            w0=30.0,
+        ).to(device)
 
-        self.mlp = nn.Sequential(*layers).to(device)
+    # @override
+    def sample(self, num_samples):
+        sample_coords = np.random.uniform(-1, 1, size=(num_samples, 3))
+        return torch.from_numpy(sample_coords).float().cuda()
 
     def forward(
         self, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
         embedding, mask = self.grid(positions)
-        sdf = self.mlp(embedding)
+
+        embedding = torch.where(
+            mask.view(-1, 1), embedding, torch.zeros_like(embedding)
+        )
+
+        # sdf = self.mlp(positions)
+        sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
 
         grad_x = torch.autograd.grad(
             outputs=sdf[..., 0],
@@ -247,11 +259,83 @@ class NeuralPoissonMLP(NeuralPoisson):
 
         return sdf, grad_x, mask
 
+    def marching_cubes(self, fname):
+        def sdf_fn(x):
+            sdf, grad_x, mask = self.forward(x)
+            return sdf.detach()
+
+        create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
+
+
+class NGP(nn.Module):
+    def __init__(
+        self,
+        num_layers=2,
+        hidden_dim=128,
+        device=torch.device("cuda:0"),
+    ):
+        super().__init__()
+
+        self.encoding = tcnn.Encoding(
+            3,
+            {
+                "otype": "HashGrid",
+                "n_levels": 4,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": 1.34,
+                "interpolation": "SmoothStep",
+            },
+        ).to(device)
+
+        self.mlp = SirenNet(
+            dim_in=3 + 8,
+            dim_hidden=hidden_dim,
+            dim_out=1,
+            num_layers=num_layers,
+            w0=30.0,
+        ).to(device)
+
+    def forward(
+        self, positions: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        positions.requires_grad_(True)
+        embedding = self.encoding(positions)
+        sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
+
+        grad_x = torch.autograd.grad(
+            outputs=sdf[..., 0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+
+        return sdf, grad_x, torch.ones_like(sdf, dtype=torch.bool).squeeze(-1)
+
+    def sample(self, num_samples):
+        sample_coords = np.random.uniform(-1, 1, size=(num_samples, 3))
+        return torch.from_numpy(sample_coords).float().cuda()
+
+    def spatial_init_(self, x):
+        pass
+
+    def marching_cubes(self, fname):
+        def sdf_fn(x):
+            sdf, grad_x, mask = self.forward(x)
+            return sdf.detach()
+
+        create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str)
-    parser.add_argument("--model", type=str, default="plain", choices=["plain", "mlp", "siren"])
+    parser.add_argument(
+        "--model", type=str, default="plain", choices=["plain", "mlp", "siren", "ngp"]
+    )
     parser.add_argument(
         "--grid_dim",
         type=int,
@@ -261,7 +345,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--sparse_grid_dim",
         type=int,
-        default=32,
+        default=16,
         help="Sparse grid dimension to split the [-1, 1] box. sparse_grid_dim=32 and grid_dim=8 results in a equivalent 256^3 grid, with embeddings only activated at a subset of 32x32x32 sparse grids",
     )
     parser.add_argument(
@@ -288,7 +372,7 @@ if __name__ == "__main__":
             args.num_embeddings,
             args.grid_dim,
             args.sparse_grid_dim,
-            initialization="zeros",
+            initialization=args.initialization,
             device=torch.device("cuda:0"),
         )
 
@@ -304,11 +388,18 @@ if __name__ == "__main__":
             device=torch.device("cuda:0"),
         )
 
-    else:
-        model = SirenMLP(in_dim=3, out_dim=1, hidden_dim=256, num_layers=5,
-                         device=torch.device("cuda:0"))
+    elif args.model == "ngp":
+        model = NGP(num_layers=2, hidden_dim=128, device=torch.device("cuda:0"))
 
-    print(model)
+    else:
+        model = SirenMLP(
+            in_dim=3,
+            out_dim=1,
+            hidden_dim=256,
+            num_layers=5,
+            device=torch.device("cuda:0"),
+        )
+
 
     # activate sparse grids
     model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
@@ -333,17 +424,12 @@ if __name__ == "__main__":
 
             sdf, grad_x, mask = model(positions)
 
-            loss_surface = sdf[mask].pow(2).mean()
+            loss_surface = sdf[mask].abs().mean()
 
-            # TODO: check how SIREN implements this
-            loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
+            loss_surface_normal = (
                 1 - F.cosine_similarity(grad_x[mask], normals[mask], dim=-1)
             ).mean()
-
-            # loss_surface_normal = (grad_x - normals)[mask].pow(2).sum(dim=-1).mean() + (
-            #     1 - (grad_x * normals)[mask].sum(dim=1)
-            # ).pow(2).mean()
-            loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).pow(2).mean()
+            loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).abs().mean()
 
             # TODO: this sampling is very aggressive and are only in the active grids
             # Ablation in SIREN to see if this causes the problem
@@ -351,17 +437,17 @@ if __name__ == "__main__":
             sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
 
             # TODO: this is kind of neural poisson but not identical
-            loss_rand_sdf = torch.exp(- 1e2 * sdf_rand[mask_rand].abs()).mean()
+            loss_rand_sdf = torch.exp(-1e2 * sdf_rand[mask_rand].abs()).mean()
             loss_rand_eikonal = (
-                (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).pow(2).mean()
+                (torch.norm(grad_x_rand[mask_rand], dim=-1) - 1).abs().mean()
             )
 
             loss = (
                 loss_surface * 3e3
                 + loss_surface_normal * 1e3
-                + loss_surface_eikonal * 5
+                + loss_surface_eikonal * 5e1
                 + loss_rand_sdf * 1e2
-                + loss_rand_eikonal * 5
+                + loss_rand_eikonal * 5e1
             )
             loss.backward()
 
