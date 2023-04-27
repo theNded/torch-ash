@@ -77,10 +77,10 @@ class SparseDenseGridQuery(torch.autograd.Function):
         grid_dim: int,
         interpolation: Literal["linear", "smooth_step"] = "smooth_step",
     ) -> torch.Tensor:
-        """Forward pass of the interpolation.
-
+        """
+        Forward pass of the interpolation.
         For simplicity, we only consider a single query point offset of (3,) and its 8 neighbors
-        y = \sum_{i=0}^7 weight(offset)[i] * embeddings[i]
+        y = \\sum_{i=0}^7 weight(offset)[i] * embeddings[i]
         Args:
             embeddings: (num_embeddings, cells_per_grid, embedding_dim) embeddings of the grid [differentiable]
             offsets: (num_queries, 3) offsets of the input [differentiable]
@@ -176,7 +176,8 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         grid_dim,
             interpolation,
     ):
-        """Forward pass of the backward function.
+        """
+        Forward pass of the backward function.
         Args:
             z: (num_queries, embedding_dim) gradient of the output w.r.t. y
             z could be the gradient of the loss w.r.t. y, i.e.,
@@ -185,7 +186,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             z could also be a all-one tensor to get jvp(x), i.e.,
                 output = dy/dembeddings, dy/doffsets
 
-            Since y = \sum_{i=0}^7 weight(offset)[i] * embeddings[i]
+            Since y = \\sum_{i=0}^7 weight(offset)[i] * embeddings[i]
 
             grad_embeddings[i] = z * weight(offset)[i]
             grad_outputs = (z * embeddings[i]) * grad_weight(offset)[i]
@@ -476,18 +477,13 @@ class SparseDenseGrid(ASHModule):
         self,
         x: torch.Tensor,
         interpolation: Literal["nearest", "linear", "smooth_step"] = "smooth_step",
-    ) -> Union[
-        Tuple[torch.Tensor, torch.Tensor],
-        Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    ]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Used for differentiable query at floating-point locations.
         Args:
             x: (N, in_dim) tensor of keys, converted to the unit of dense grid cells.
         Returns:
             values: (N, embedding_dim) tensor of features
             masks: (N, 1) tensor of masks
-        if compute_grad_x, also returns:
-            grad_x: (N, embedding_dim, in_dim) tensor of gradients
         """
         x = self.transform_world_to_cell(x)
 
