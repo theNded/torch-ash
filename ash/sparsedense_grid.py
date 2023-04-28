@@ -157,7 +157,18 @@ class SparseDenseGridQuery(torch.autograd.Function):
             ctx.grid_dim,
             ctx.interpolation,
         )
-        return grad_embeddings, grad_offsets, None, None, None, None, None, None, None, None
+        return (
+            grad_embeddings,
+            grad_offsets,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class SparseDenseGridQueryBackward(torch.autograd.Function):
@@ -174,7 +185,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         neighbor_table_cell2cell,
         neighbor_table_cell2grid,
         grid_dim,
-            interpolation,
+        interpolation,
     ):
         """
         Forward pass of the backward function.
@@ -289,7 +300,19 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             ctx.grid_dim,
             ctx.interpolation,
         )
-        return None, grad_embeddings, None, None, None, None, None, None, None, None, None
+        return (
+            None,
+            grad_embeddings,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class SparseDenseGrid(ASHModule):
@@ -859,3 +882,11 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
     def grids_in_bound(self, grid_coords: torch.Tensor) -> torch.Tensor:
         masks = ((grid_coords >= 0) * (grid_coords < self.sparse_grid_dim)).all(dim=-1)
         return grid_coords[masks]
+
+    def full_init_(self):
+        grid_coords = torch.stack(
+            torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * 3)
+        ).reshape(3, -1).T.to(self.device)
+
+        self.engine.insert_keys(grid_coords)
+

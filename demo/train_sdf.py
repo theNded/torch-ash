@@ -49,7 +49,8 @@ class NeuralPoisson(nn.Module):
             device=device,
         )
         if initialization == "random":
-            nn.init.normal_(self.grid.embeddings, mean=0.0, std=0.05)
+            nn.init.normal_(self.grid.embeddings, mean=0.0, std=0.001)
+            # nn.init.zeros_(self.grid.embeddings)
         elif initialization == "zeros":
             nn.init.zeros_(self.grid.embeddings)
         else:
@@ -63,6 +64,9 @@ class NeuralPoisson(nn.Module):
     @torch.no_grad()
     def spatial_init_(self, positions: torch.Tensor):
         self.grid.spatial_init_(positions, dilation=0)
+
+    def full_init_(self):
+        self.grid.full_init_()
 
     def sample(self, num_samples=10000):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
@@ -185,17 +189,21 @@ class NeuralPoissonMultiResMLP(nn.Module):
         super().__init__()
         self.grid = BoundedMultiResGrid(
             in_dim=3,
-            num_embeddings=[512, 2048, 8196, 32768],
+            # num_embeddings=[512, 2048, 8196, 32768],
+            # embedding_dims=2,
+            # grid_dims=2,
+            # sparse_grid_dims=[8, 16, 32, 64],
+            num_embeddings=[512],
             embedding_dims=2,
             grid_dims=2,
-            sparse_grid_dims=[8, 16, 32, 64],
+            sparse_grid_dims=[8],
             bbox_min=-1 * torch.ones(3, device=device),
             bbox_max=1 * torch.ones(3, device=device),
             device=device,
         )
 
         self.mlp = SirenNet(
-            dim_in=3 + 8,
+            dim_in=3 + 2,
             dim_hidden=128,
             dim_out=1,
             num_layers=2,
@@ -275,10 +283,10 @@ class NeuralPoissonMLP(NeuralPoisson):
         )
 
         self.mlp = SirenNet(
-            dim_in=3 + embedding_dim,
-            dim_hidden=hidden_dim,
+            dim_in=3 + 8,
+            dim_hidden=128,
             dim_out=1,
-            num_layers=num_layers,
+            num_layers=2,
             w0=30.0,
         ).to(device)
 
@@ -291,11 +299,11 @@ class NeuralPoissonMLP(NeuralPoisson):
         self, positions: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
-        embedding, mask = self.grid(positions)
+        embedding, mask = self.grid(positions, interpolation="linear")
 
-        embedding = torch.where(
-            mask.view(-1, 1), embedding, torch.zeros_like(embedding)
-        )
+        # embedding = torch.where(
+        #     mask.view(-1, 1), embedding, torch.zeros_like(embedding)
+        # )
 
         # sdf = self.mlp(positions)
         sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
@@ -319,6 +327,7 @@ class NeuralPoissonMLP(NeuralPoisson):
         create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
 
 
+
 class NGP(nn.Module):
     def __init__(
         self,
@@ -331,21 +340,21 @@ class NGP(nn.Module):
         self.encoding = tcnn.Encoding(
             3,
             {
-                "otype": "HashGrid",
-                "n_levels": 4,
-                "n_features_per_level": 2,
-                "log2_hashmap_size": 19,
+                "otype": "DenseGrid",
+                "n_levels": 1,
+                "n_features_per_level": 8,
+                "log2_hashmap_size": 12,
                 "base_resolution": 16,
-                "per_level_scale": 1.34,
-                "interpolation": "SmoothStep",
+                "per_level_scale": 2,
+                "interpolation": "Linear",
             },
         ).to(device)
 
         self.mlp = SirenNet(
             dim_in=3 + 8,
-            dim_hidden=hidden_dim,
+            dim_hidden=128,
             dim_out=1,
-            num_layers=num_layers,
+            num_layers=2,
             w0=30.0,
         ).to(device)
 
@@ -374,6 +383,9 @@ class NGP(nn.Module):
     def spatial_init_(self, x):
         pass
 
+    def full_init_(self):
+        pass
+
     def marching_cubes(self, fname):
         def sdf_fn(x):
             sdf, grad_x, mask = self.forward(x)
@@ -391,7 +403,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--grid_dim",
         type=int,
-        default=8,
+        default=1,
         help="Locally dense grid dimension, e.g. 8 for 8x8x8",
     )
     parser.add_argument(
@@ -465,11 +477,12 @@ if __name__ == "__main__":
         )
 
     # activate sparse grids
-    model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
+    # model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
+    model.full_init_()
 
-    o3d.visualization.draw(
-        [dataset.pcd, model.bbox_lineset] + model.visualize_occupied_cells())
-    # )
+    # o3d.visualization.draw(
+    #     [dataset.pcd, model.bbox_lineset] + [model.visualize_occupied_cells()])
+
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
@@ -486,20 +499,24 @@ if __name__ == "__main__":
         normals = batch["normal"].cuda()
 
         sdf, grad_x, mask = model(positions)
-        # print('surface valid ratio:', mask.sum() / mask.numel())
+        #print('surface valid ratio:', mask.sum() / mask.numel())
 
         loss_surface = sdf[mask].abs().mean()
 
         loss_surface_normal = (
-            1 - F.cosine_similarity(grad_x[mask], normals[mask], dim=-1)
+            1 - F.cosine_similarity(grad_x, normals, dim=-1)
         ).mean()
+
+        # print(sdf.max(), grad_x.max())
         loss_surface_eikonal = (torch.norm(grad_x[mask], dim=-1) - 1).abs().mean()
 
         # TODO: this sampling is very aggressive and are only in the active grids
         # Ablation in SIREN to see if this causes the problem
         rand_positions = model.sample(num_samples=int(len(positions)))
         sdf_rand, grad_x_rand, mask_rand = model(rand_positions)
-        # print('off-surface valid ratio:', mask_rand.sum() / mask_rand.numel())
+        #print(sdf_rand.max(), grad_x_rand.max())
+
+        #print('off-surface valid ratio:', mask_rand.sum() / mask_rand.numel())
 
         # TODO: this is kind of neural poisson but not identical
         loss_rand_sdf = torch.exp(-1e2 * sdf_rand[mask_rand].abs()).mean()
@@ -508,11 +525,11 @@ if __name__ == "__main__":
         )
 
         loss = (
-            loss_surface * 3e3
+            loss_surface * 0 # 3e3
             + loss_surface_normal * 1e3
             + loss_surface_eikonal * 5e1
-            + loss_rand_sdf * 1e2
-            + loss_rand_eikonal * 5e1
+            + loss_rand_sdf * 0#1e2
+            + loss_rand_eikonal * 0#5e1
         )
         loss.backward()
 
@@ -526,6 +543,6 @@ if __name__ == "__main__":
         )
         optimizer.step()
 
-        if step % 1000 == 0:
+        if step % 500 == 0:
             scheduler.step()
             model.marching_cubes(f"mesh_{step:03d}.ply")
