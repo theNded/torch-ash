@@ -5,6 +5,8 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from torch.utils.tensorboard import SummaryWriter
 from torch.utils.dlpack import from_dlpack, to_dlpack
 
 from ash import (
@@ -27,6 +29,8 @@ import tinycudann as tcnn
 
 from data_provider import PointCloudDataset, Dataloader
 
+np.random.seed(15213)
+torch.manual_seed(15213)
 
 class NeuralSDF(nn.Module):
     def __init__(
@@ -45,16 +49,17 @@ class NeuralSDF(nn.Module):
         if encoder == "ash":
             self.encoder = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=resolution**3,
+                num_embeddings=2 * resolution**3,
                 embedding_dim=embedding_dim,
                 grid_dim=1,
                 sparse_grid_dim=resolution,
                 device=device,
             )
-            nn.init.normal_(self.encoder.embeddings, mean=0.0, std=0.01)
+            nn.init.uniform_(self.encoder.embeddings, -1e-5, 1e-5)
 
             # Active all entries
             self.encoder.full_init_()
+            print(self.encoder.engine.size())
 
         elif encoder == "ngp":
             self.encoder = tcnn.Encoding(
@@ -63,10 +68,10 @@ class NeuralSDF(nn.Module):
                     "otype": "DenseGrid",
                     "n_levels": 1,
                     "n_features_per_level": embedding_dim,
-                    "log2_hashmap_size": resolution**3,
+                    "log2_hashmap_size": 19,
                     "base_resolution": resolution,
                     "per_level_scale": 2,
-                    "interpolation": "SmoothStep",
+                    "interpolation": "Linear",
                 },
             ).to(device)
 
@@ -79,8 +84,9 @@ class NeuralSDF(nn.Module):
         ).to(device)
 
     def sample(self, num_samples):
-        sample_coords = np.random.uniform(-1, 1, size=(num_samples, 3))
-        return torch.from_numpy(sample_coords).float().cuda()
+        eps = 1e-3
+        sample_coords = np.random.uniform(-1.0 + eps, 1.0 - eps, size=(num_samples, 3))
+        return torch.from_numpy(sample_coords).float().contiguous().cuda()
 
     @torch.no_grad()
     def visualize_occupied_cells(self):
@@ -99,7 +105,7 @@ class NeuralSDF(nn.Module):
         positions.requires_grad_(True)
 
         if self.encoder_type == "ash":
-            embedding, mask = self.encoder(positions, interpolation="smooth_step")
+            embedding, mask = self.encoder(positions, interpolation="linear")
             assert mask.all()
         elif self.encoder_type == "ngp":
             embedding = self.encoder(positions)
@@ -136,6 +142,10 @@ if __name__ == "__main__":
     # fmt: on
     args = parser.parse_args()
 
+    logs = Path('logs') / args.model
+    logs.mkdir(exist_ok=True, parents=True)
+    writer = SummaryWriter(log_dir=logs, comment=f"{args.model}_{args.resolution}_{args.embedding_dim}")
+
     dataset = PointCloudDataset(args.path)
     dataloader = Dataloader(dataset, batch_size=25000, shuffle=True)
 
@@ -150,7 +160,7 @@ if __name__ == "__main__":
     occupied_cells = model.visualize_occupied_cells()
     o3d.visualization.draw(occupied_cells + [dataset.pcd, bbox_lineset])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     pbar = tqdm(range(20000))
@@ -172,6 +182,7 @@ if __name__ == "__main__":
         sdf_rand, grad_x_rand = model(rand_positions)
 
         loss_rand_sdf = torch.exp(-1e2 * sdf_rand.abs()).mean()
+        # loss_rand_sdf = torch.exp(-sdf_rand.abs()).mean()
         loss_rand_eikonal = (torch.norm(grad_x_rand, dim=-1) - 1).abs().mean()
 
         loss = (
@@ -191,8 +202,16 @@ if __name__ == "__main__":
             f"rand_sdf={loss_rand_sdf.item():.4f},"
             f"rand_eikonal={loss_rand_eikonal.item():.4f}"
         )
+        writer.add_scalar("loss/loss", loss.item(), step)
+        writer.add_scalar("loss/loss_surface", loss_surface.item(), step)
+        writer.add_scalar("loss/loss_surface_normal", loss_surface_normal.item(), step)
+        writer.add_scalar("loss/loss_surface_eikonal", loss_surface_eikonal.item(), step)
+        writer.add_scalar("loss/loss_rand_sdf", loss_rand_sdf.item(), step)
+        writer.add_scalar("loss/loss_rand_eikonal", loss_rand_eikonal.item(), step)
+
         optimizer.step()
 
-        if step % 500 == 0:
+        if step % 1000 == 0 and step > 0:
             scheduler.step()
             model.marching_cubes(f"mesh_{step:03d}_{args.model}.ply")
+            #exit()
