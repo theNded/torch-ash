@@ -164,7 +164,7 @@ if __name__ == "__main__":
     )
 
     occupied_cells = model.visualize_occupied_cells()
-    o3d.visualization.draw(occupied_cells + [dataset.pcd, bbox_lineset])
+    # o3d.visualization.draw(occupied_cells + [dataset.pcd, bbox_lineset])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
@@ -193,10 +193,10 @@ if __name__ == "__main__":
 
         loss = (
             loss_surface * 3e3
-            + loss_surface_normal * 1e3
-            + loss_surface_eikonal * 5e1
+            + loss_surface_normal * 0 #* 1e3
+            + loss_surface_eikonal * 0#* 5e1
             + loss_rand_sdf * 1e2
-            + loss_rand_eikonal * 5e1
+            + loss_rand_eikonal * 0#* 5e1
         )
         loss.backward()
 
@@ -205,7 +205,7 @@ if __name__ == "__main__":
             f"sdf={loss_surface.item():.4f},"
             f"normal={loss_surface_normal.item():.4f},"
             f"eikonal={loss_surface_eikonal.item():.4f},"
-            f"rand_sdf={loss_rand_sdf.item():.4f},"
+``            f"rand_sdf={loss_rand_sdf.item():.4f},"
             f"rand_eikonal={loss_rand_eikonal.item():.4f}"
         )
         writer.add_scalar("loss/loss", loss.item(), step)
