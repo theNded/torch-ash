@@ -73,10 +73,12 @@ class NeuralSDF(nn.Module):
                     "per_level_scale": 2,
                     "interpolation": "Linear",
                 },
+                dtype=torch.float32,
             ).to(device)
+            print(self.encoder.native_tcnn_module.param_precision())
 
         self.mlp = SirenNet(
-            dim_in=3 + embedding_dim,
+            dim_in=embedding_dim,
             dim_hidden=hidden_dim,
             dim_out=1,
             num_layers=num_layers,
@@ -108,16 +110,20 @@ class NeuralSDF(nn.Module):
             embedding, mask = self.encoder(positions, interpolation="linear")
             assert mask.all()
         elif self.encoder_type == "ngp":
-            embedding = self.encoder(positions)
+            positions = positions * 0.5 + 0.5
+            # print(positions.min(), positions.max())
+            # print(positions)
 
-        sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
+            embedding = self.encoder(positions)
+            # print(embedding.shape, embedding.dtype)
+
+        sdf = self.mlp(torch.cat((embedding,), dim=-1))
 
         grad_x = torch.autograd.grad(
             outputs=sdf[..., 0],
             inputs=positions,
             grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
             create_graph=True,
-            only_inputs=True,
         )[0]
 
         return sdf, grad_x
@@ -163,7 +169,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    pbar = tqdm(range(20000))
+    pbar = tqdm(range(10000))
     for step in pbar:
         batch = next(iter(dataloader))
 

@@ -509,8 +509,10 @@ class SparseDenseGrid(ASHModule):
             masks: (N, 1) tensor of masks
         """
         x = self.transform_world_to_cell(x)
+        # print(x.min(), x.max())
 
         grid_indices, cell_indices, offsets, masks = self.query(x)
+        # print(grid_indices, cell_indices, offsets, masks)
 
         if interpolation == "nearest":
             return self.embeddings[grid_indices, cell_indices], masks
