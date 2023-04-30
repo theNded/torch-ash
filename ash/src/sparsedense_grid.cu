@@ -126,11 +126,12 @@ __global__ void query_forward_kernel(
     }
 
     if (sum_weight < kInterpSumWeightThreshold) {
+        printf("forward: invalid sum weight: %f\n", sum_weight);
         return;
     }
 
     for (int k = 0; k < embedding_dims; ++k) {
-        output[i * embedding_dims + k] = sum_output[k] / sum_weight;
+        output[i * embedding_dims + k] = sum_output[k];
     }
 }
 
@@ -234,6 +235,7 @@ __global__ void query_backward_forward_kernel(
         sum_weight += weight;
     }
     if (sum_weight < kInterpSumWeightThreshold) {
+        printf("backward forward: invalid sum weight: %f\n", sum_weight);
         return;
     }
 
@@ -264,13 +266,13 @@ __global__ void query_backward_forward_kernel(
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
 
         scalar_t dot = 0.0;
-        scalar_t normalized_weight = weight / sum_weight;
+        scalar_t normalized_weight = weight;
         for (int k = 0; k < embedding_dims; ++k) {
             atomicAdd(&grad_embeddings[base_idx + k],
                       normalized_weight * z[i * embedding_dims + k]);
             dot += embeddings[base_idx + k] * z[i * embedding_dims + k];
         }
-        grad_offsets[i] += (dot / sum_weight) * weight_grad;
+        grad_offsets[i] += dot * weight_grad;
     }
 };
 
@@ -382,6 +384,7 @@ __global__ void query_backward_backward_kernel(
         sum_weight += weight;
     }
     if (sum_weight < kInterpSumWeightThreshold) {
+        printf("backward backward: invalid sum weight: %f\n", sum_weight);
         return;
     }
 
@@ -409,7 +412,7 @@ __global__ void query_backward_backward_kernel(
         int base_idx_rhs = i * embedding_dims;
 
         scalar_t dot = weight_grad.dot(grad_grad_offset[i]);
-        scalar_t factor = dot / sum_weight;
+        scalar_t factor = dot;
         for (int k = 0; k < embedding_dims; ++k) {
             atomicAdd(&grad_embeddings[base_idx_lhs + k],
                       factor * z[base_idx_rhs + k]);

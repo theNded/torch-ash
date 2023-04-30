@@ -537,6 +537,7 @@ class SparseDenseGrid(ASHModule):
 
         elif interpolation in ["linear", "smooth_step"]:
             if self.grid_coords is None or self.neighbor_table_grid2grid is None:
+                print('Re-construct neighbor tables')
                 self.construct_sparse_neighbor_tables_()
 
             features = SparseDenseGridQuery.apply(
