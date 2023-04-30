@@ -191,11 +191,15 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         Forward pass of the backward function.
         Args:
             z: (num_queries, embedding_dim) gradient of the output w.r.t. y
-            z could be the gradient of the loss w.r.t. y, i.e.,
+
+            z could be a tensor without gradient.
+            Itself is the gradient of the loss w.r.t. y, i.e.,
                 output = dL/dy * dy/dembeddings, dL/dy * dy/doffsets
                        = dL/dembeddings, dL/doffsets
-            z could also be a all-one tensor to get jvp(x), i.e.,
-                output = dy/dembeddings, dy/doffsets
+
+            z could also be a tensor with gradient when used as the forward pass
+            to compute jvp via torch.autograd.grad.
+            It gradient should be passed back to downstream layers (e.g. MLP).
 
             Since y = \\sum_{i=0}^7 weight(offset)[i] * embeddings[i]
 
@@ -251,6 +255,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         """Backward pass of the backward function.
         When a gradient is computed in by the backward's forward pass and used to compute a loss, its gradient
         need to be properly back propagated back to embeddings and offsets.
+
         Args:
             z: (num_queries, embedding_dim) gradient of the output w.r.t. y
             grad_grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
@@ -259,15 +264,20 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             Let
                 w1 = grad_embeddings[i] = z * weight(offset)[i], grad_w1 = grad_grad_embeddings[i]
                 w2 = grad_offsets = (z * embeddings[i]) * grad_weight(offset)[i], grad_w2 = grad_grad_offsets
-            We know that w1 is not used in the forward pass, so we can safely ignore dL/dw1.
+
+        TODO: now grad_grad_embeddings is not used. If feature-grid regularization is needed,
+        we need to add it back. Now we safely ignore grad_w1.
+        TODO: at current, grad_offsets are skipped as offsets are not optimized.
             Then we have
+                grad_z = grad_w1 * dw1/dz + grad_w2 * dw2/dz = grad_w2 * dw2/dz
+                       = (grad_w2 * grad_weight(offset)[i]) * embeddings[i] => (num_queries, embedding_dim)
                 grad_embeddings[i] = grad_w2 * dw1/dembeddings[i]
                                    = (grad_w2  * grad_weight(offset)[i]) * z => (1, num_embeddings)
                 grad_offsets = grad_w2 * dw2/doffsets
                              = (z * embeddings[i]) * grad_w2 * hessian_weight(offset)[i] => (1, 3)
-        TODO: at current, grad_offsets are skipped as offsets are not optimized.
 
         Returns:
+            grad_z: (num_queries, embedding_dim) gradient of the output w.r.t. z
             grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
             grad_offsets: (num_queries, 3)
         """
@@ -284,8 +294,14 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
+        print(
+            "backward backward --------------------------------------",
+            f"grad_grad_embeddings: {grad_grad_embeddings.nonzero()}",
+            f"grad_grad_offsets={grad_grad_offsets.nonzero()}",
+            f"z={z.nonzero()}",
+        )
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
-        grad_embeddings, grad_offsets = backend.query_backward_backward(
+        grad_z, grad_embeddings, grad_offsets = backend.query_backward_backward(
             grad_grad_embeddings,
             grad_grad_offsets,
             z,
@@ -301,9 +317,11 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             ctx.interpolation,
         )
         return (
-            None,
+            # torch.ones_like(z),
+            grad_z,
             grad_embeddings,
             None,
+            # 1e10 * torch.ones_like(grad_offsets),
             None,
             None,
             None,
@@ -886,9 +904,10 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         return grid_coords[masks]
 
     def full_init_(self):
-        grid_coords = torch.stack(
-            torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * 3)
-        ).reshape(3, -1).T.to(self.device)
+        grid_coords = (
+            torch.stack(torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * 3))
+            .reshape(3, -1)
+            .T.to(self.device)
+        )
 
         self.engine.insert_keys(grid_coords)
-

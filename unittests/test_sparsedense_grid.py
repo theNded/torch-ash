@@ -298,9 +298,22 @@ class TestSparseDenseGrid:
 
         def grad_x_fn(x):
             x.requires_grad_(True)
-            output, mask = grid(x, interpolation="linear")
+            output, mask = grid(x, interpolation="smooth_step")
             assert mask.all()
             return output
+
+        def gradgrad_x_fn(x):
+            x.requires_grad_(True)
+            output, mask = grid(x, interpolation="smooth_step")
+            assert mask.all()
+            grad_x = torch.autograd.grad(
+                output,
+                (x,),
+                torch.ones_like(output, requires_grad=False),
+                create_graph=True,
+            )
+
+            return grad_x
 
         torch.autograd.gradcheck(
             grad_x_fn,
@@ -309,6 +322,14 @@ class TestSparseDenseGrid:
             atol=1e-3,
             rtol=1e-3,
         )
+
+        # torch.autograd.gradcheck(
+        #     gradgrad_x_fn,
+        #     (query_positions,),
+        #     eps=eps * grid.cell_size[0],
+        #     atol=1e-3,
+        #     rtol=1e-3,
+        # )
 
     def _backward_backward_block(self, in_dim, embedding_dim, grid_dim):
         grid = SparseDenseGrid(

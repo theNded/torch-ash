@@ -61,7 +61,7 @@ struct functor_t {
         AT_ERROR("Unknown interpolation functor: ", name);         \
     }
 
-const float kInterpSumWeightThreshold = 0.5;
+const float kInterpSumWeightThreshold = 0.999;
 
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
@@ -328,6 +328,7 @@ template <typename InterpFunctor, typename DiffInterpFunctor, typename scalar_t>
 __global__ void query_backward_backward_kernel(
         const MiniVec<scalar_t, 3>* __restrict__ grad_grad_offset,
         const scalar_t* __restrict__ z,
+        const scalar_t* __restrict__ embeddings,
         const MiniVec<float, 3>* __restrict__ offsets,
         const int64_t* __restrict__ grid_indices,
         const int64_t* __restrict__ cell_indices,
@@ -335,6 +336,7 @@ __global__ void query_backward_backward_kernel(
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        scalar_t* __restrict__ grad_z,
         scalar_t* __restrict__ grad_embeddings,
         MiniVec<scalar_t, 3>* __restrict__ grad_offsets,
         const int64_t grid_dim,
@@ -408,11 +410,12 @@ __global__ void query_backward_backward_kernel(
         for (int k = 0; k < embedding_dims; ++k) {
             atomicAdd(&grad_embeddings[base_idx_lhs + k],
                       factor * z[base_idx_rhs + k]);
+            grad_z[base_idx_rhs + k] += factor * embeddings[base_idx_lhs + k];
         }
     }
 };
 
-std::tuple<at::Tensor, at::Tensor> query_backward_backward(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& grad_grad_embeddings,
         const at::Tensor& grad_grad_offset,
         const at::Tensor& z,
@@ -437,6 +440,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
     const int64_t embedding_dims = embeddings.size(2);
     const int64_t num_cells_per_grid = embeddings.size(1);
 
+    at::Tensor grad_z = at::zeros_like(z);
     at::Tensor grad_embeddings = at::zeros_like(embeddings);
 
     // ignored for now
@@ -452,6 +456,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
                             static_cast<MiniVec<scalar_t, 3>*>(
                                     grad_grad_offset.data_ptr()),
                             z.data_ptr<scalar_t>(),
+                            embeddings.data_ptr<scalar_t>(),
                             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
                             grid_indices.data_ptr<int64_t>(),
                             cell_indices.data_ptr<int64_t>(),
@@ -462,6 +467,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
                                     neighbor_table_cell2cell.data_ptr()),
                             static_cast<MiniVec<int64_t, 8>*>(
                                     neighbor_table_cell2grid.data_ptr()),
+                            grad_z.data_ptr<scalar_t>(),
                             grad_embeddings.data_ptr<scalar_t>(),
                             static_cast<MiniVec<scalar_t, 3>*>(
                                     grad_offsets.data_ptr()),
@@ -470,7 +476,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    return std::make_tuple(grad_embeddings, grad_offsets);
+    return std::make_tuple(grad_z, grad_embeddings, grad_offsets);
 }
 
 template <typename scalar_t>

@@ -54,17 +54,16 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 //
 // Remember only z1 is used in the forward computation (the gradient df/dx),
 // we can safely ignore z2 b=dldz.
-// Also, a is a all-1 tensor, so we can also safely ignore dlda.
 //
 // The output is thus reduced to:
-// w1 = None
+// w1 = dl/dz1 dz1/da = dl/dz1 d(a * df/dx)/da = dl/dz1 df/dx
 // w2 = dl/dz1 dz1/dx = dl/dz1 d(a * df/dx)/dx = dl/dz1 d^2f/dx^2
 // w3 = dl/dz1 dz1/dtheta = dl/dz1 d(a * df/dx)/dtheta = dl/dz1 d^2f/dxdtheta
 //
 // If we do not optimize x (that might be dependent on poses, for instance),
 // we can safely ignore w2 as well.
 // clang-format on
-std::tuple<at::Tensor, at::Tensor> query_backward_backward(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& grad_dLdembedding,
         const at::Tensor& grad_dLdoffset,
         const at::Tensor& z,
