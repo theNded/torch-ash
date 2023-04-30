@@ -49,10 +49,12 @@ class NeuralSDF(nn.Module):
         if encoder == "ash":
             self.encoder = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=2 * resolution**3,
+                num_embeddings=resolution**3,
                 embedding_dim=embedding_dim,
                 grid_dim=1,
                 sparse_grid_dim=resolution,
+                bbox_min=torch.zeros(3, dtype=torch.float32, device=device),
+                bbox_max=torch.ones(3, dtype=torch.float32, device=device),
                 device=device,
             )
             nn.init.uniform_(self.encoder.embeddings, -1e-4, 1e-4)
@@ -89,7 +91,7 @@ class NeuralSDF(nn.Module):
         ).to(device)
 
     def sample(self, num_samples):
-        eps = 1e-3
+        eps = 1e-2
         sample_coords = np.random.uniform(-1.0 + eps, 1.0 - eps, size=(num_samples, 3))
         return torch.from_numpy(sample_coords).float().contiguous().cuda()
 
@@ -109,11 +111,12 @@ class NeuralSDF(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
 
+        positions = positions * 0.5 + 0.5
         if self.encoder_type == "ash":
             embedding, mask = self.encoder(positions, interpolation="linear")
             assert mask.all()
         elif self.encoder_type == "ngp":
-            positions = positions * 0.5 + 0.5
+
             # print(positions.min(), positions.max())
             # print(positions)
 

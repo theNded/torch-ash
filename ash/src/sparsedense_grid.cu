@@ -105,6 +105,7 @@ __global__ void query_forward_kernel(
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
+            printf("forward forward: invalid neighbor\n");
             continue;
         }
 
@@ -219,6 +220,7 @@ __global__ void query_backward_forward_kernel(
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
+            printf("backward forward: invalid neighbor\n");
             continue;
         }
 
@@ -367,6 +369,7 @@ __global__ void query_backward_backward_kernel(
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
+            printf("backward backward: invalid neighbor\n");
             continue;
         }
 
