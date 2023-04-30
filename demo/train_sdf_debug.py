@@ -55,7 +55,7 @@ class NeuralSDF(nn.Module):
                 sparse_grid_dim=resolution,
                 device=device,
             )
-            nn.init.uniform_(self.encoder.embeddings, -1e-5, 1e-5)
+            nn.init.uniform_(self.encoder.embeddings, -1e-4, 1e-4)
 
             # Active all entries
             self.encoder.full_init_()
@@ -75,6 +75,9 @@ class NeuralSDF(nn.Module):
                 },
                 dtype=torch.float32,
             ).to(device)
+            # print(self.encoder.params.min(), self.encoder.params.max(), self.encoder.params.mean(), self.encoder.params.std(), self.encoder.params.median())
+            nn.init.uniform_(self.encoder.params, -1e-4, 1e-4)
+
             print(self.encoder.native_tcnn_module.param_precision())
 
         self.mlp = SirenNet(
@@ -103,7 +106,7 @@ class NeuralSDF(nn.Module):
 
     def forward(
         self, positions: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
 
         if self.encoder_type == "ash":
@@ -229,4 +232,7 @@ if __name__ == "__main__":
         if step % 1000 == 0 and step > 0:
             scheduler.step()
             model.marching_cubes(f"mesh_{step:03d}_{args.model}.ply")
+            mesh = o3d.io.read_triangle_mesh(f"mesh_{step:03d}_{args.model}.ply")
+            mesh.compute_vertex_normals()
+            # o3d.visualization.draw(occupied_cells + [mesh, dataset.pcd, bbox_lineset])
             #exit()

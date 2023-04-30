@@ -76,6 +76,21 @@ class TestSparseDenseGrid:
         nb_coords_last_expected = (coords + offset_last) % grid_dim
         assert torch.all(nb_coords_last == nb_coords_last_expected)
 
+    def _bounded_neighbor_block(self, in_dim, embedding_dim, grid_dim, sparse_grid_dim):
+        grid = BoundedSparseDenseGrid(
+            in_dim=in_dim,
+            num_embeddings=self.capacity,
+            embedding_dim=embedding_dim,
+            grid_dim=grid_dim,
+            sparse_grid_dim=sparse_grid_dim,
+            device=self.device,
+        )
+
+        grid.full_init_()
+
+
+
+
     def _item_block(self, in_dim, embedding_dim, grid_dim):
         grid = SparseDenseGrid(
             in_dim=in_dim,
@@ -301,19 +316,6 @@ class TestSparseDenseGrid:
             output, mask = grid(x, interpolation="smooth_step")
             assert mask.all()
             return output
-
-        def gradgrad_x_fn(x):
-            x.requires_grad_(True)
-            output, mask = grid(x, interpolation="smooth_step")
-            assert mask.all()
-            grad_x = torch.autograd.grad(
-                output,
-                (x,),
-                torch.ones_like(output, requires_grad=False),
-                create_graph=True,
-            )
-
-            return grad_x
 
         torch.autograd.gradcheck(
             grad_x_fn,

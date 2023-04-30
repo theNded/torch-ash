@@ -294,12 +294,12 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
-        print(
-            "backward backward --------------------------------------",
-            f"grad_grad_embeddings: {grad_grad_embeddings.nonzero()}",
-            f"grad_grad_offsets={grad_grad_offsets.nonzero()}",
-            f"z={z.nonzero()}",
-        )
+        # print(
+        #     "backward backward --------------------------------------",
+        #     f"grad_grad_embeddings: {grad_grad_embeddings.nonzero()}",
+        #     f"grad_grad_offsets={grad_grad_offsets.nonzero()}",
+        #     f"z={z.nonzero()}",
+        # )
         # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
         grad_z, grad_embeddings, grad_offsets = backend.query_backward_backward(
             grad_grad_embeddings,
