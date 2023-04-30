@@ -695,8 +695,8 @@ class SparseDenseGrid(ASHModule):
                 self.neighbor_table_cell2cell,
                 self.neighbor_table_cell2grid,
                 self.grid_dim,
-                0.0,
-                1.0,
+                iso_value,
+                weight_thr,
             )
             positions = self.transform_cell_to_world(vertices)
             if len(positions) == 0:
@@ -722,8 +722,8 @@ class SparseDenseGrid(ASHModule):
                 self.neighbor_table_cell2cell,
                 self.neighbor_table_cell2grid,
                 self.grid_dim,
-                0.0,
-                1.0,
+                iso_value,
+                weight_thr,
             )
             positions = self.transform_cell_to_world(vertices)
             if len(positions) == 0:
