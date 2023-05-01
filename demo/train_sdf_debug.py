@@ -51,8 +51,8 @@ class NeuralSDF(nn.Module):
                 in_dim=3,
                 num_embeddings=resolution**3,
                 embedding_dim=embedding_dim,
-                grid_dim=1,
-                sparse_grid_dim=resolution,
+                grid_dim=resolution,
+                sparse_grid_dim=1,
                 bbox_min=torch.zeros(3, dtype=torch.float32, device=device),
                 bbox_max=torch.ones(3, dtype=torch.float32, device=device),
                 device=device,
@@ -83,7 +83,7 @@ class NeuralSDF(nn.Module):
             print(self.encoder.native_tcnn_module.param_precision())
 
         self.mlp = SirenNet(
-            dim_in=embedding_dim,
+            dim_in=embedding_dim + 3,
             dim_hidden=hidden_dim,
             dim_out=1,
             num_layers=num_layers,
@@ -123,7 +123,7 @@ class NeuralSDF(nn.Module):
             embedding = self.encoder(positions)
             # print(embedding.shape, embedding.dtype)
 
-        sdf = self.mlp(torch.cat((embedding,), dim=-1))
+        sdf = self.mlp(torch.cat((embedding, positions), dim=-1))
 
         grad_x = torch.autograd.grad(
             outputs=sdf[..., 0],
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    pbar = tqdm(range(10000))
+    pbar = tqdm(range(3001))
     for step in pbar:
         batch = next(iter(dataloader))
 
@@ -204,7 +204,7 @@ if __name__ == "__main__":
             + loss_rand_sdf * 1e2
             + loss_rand_eikonal * 5e1
         )
-        loss.backward(retain_graph=True)
+        loss.backward()
 
         # import torchviz
         # torchviz.make_dot(
@@ -233,7 +233,7 @@ if __name__ == "__main__":
         optimizer.step()
 
         if step % 1000 == 0 and step > 0:
-            scheduler.step()
+            # scheduler.step()
             model.marching_cubes(f"mesh_{step:03d}_{args.model}.ply")
             mesh = o3d.io.read_triangle_mesh(f"mesh_{step:03d}_{args.model}.ply")
             mesh.compute_vertex_normals()

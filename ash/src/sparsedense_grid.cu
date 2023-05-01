@@ -61,7 +61,7 @@ struct functor_t {
         AT_ERROR("Unknown interpolation functor: ", name);         \
     }
 
-const float kInterpSumWeightThreshold = 0.999;
+const float kInterpSumWeightThreshold = 0.99999;
 
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
@@ -289,15 +289,19 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const int64_t grid_dim,
         const std::string& interpolation) {
     const int64_t len = grid_indices.size(0);
+    // printf("len: %ld\n", len);
 
     const int64_t threads = 256;
     const int64_t blocks = (len + threads - 1) / threads;
 
     const int64_t embedding_dims = embeddings.size(2);
     const int64_t num_cells_per_grid = embeddings.size(1);
+    // printf("embedding_dims: %ld\n", embedding_dims);
+    // printf("num_cells_per_grid: %ld\n", num_cells_per_grid);
 
     at::Tensor grad_embeddings = at::zeros_like(embeddings);
     at::Tensor grad_offsets = at::zeros_like(offsets, embeddings.dtype());
+    // std::cout << "init grad_offsets: " << grad_offsets << std::endl;
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_forward_kernel", [&] {
@@ -324,7 +328,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
                 });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
-
+    // std::cout << "computed grad_offsets: " << grad_offsets << std::endl;
     return std::make_tuple(grad_embeddings, grad_offsets);
 }
 
