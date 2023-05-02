@@ -38,6 +38,7 @@ def exists(val):
 def cast_tuple(val, repeat=1):
     return val if isinstance(val, tuple) else ((val,) * repeat)
 
+
 class Sine(nn.Module):
     def __init__(self, w0=1.0):
         super().__init__()
@@ -45,6 +46,7 @@ class Sine(nn.Module):
 
     def forward(self, x):
         return torch.sin(self.w0 * x)
+
 
 class SirenLayer(nn.Module):
     def __init__(
@@ -82,6 +84,7 @@ class SirenLayer(nn.Module):
         out = F.linear(x, self.weight, self.bias)
         out = self.activation(out)
         return out
+
 
 class SirenNet(nn.Module):
     def __init__(

@@ -1,10 +1,8 @@
 from setuptools import setup
 import subprocess
-import shutil
 import os
 import os.path as osp
 import warnings
-from sys import argv
 
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
