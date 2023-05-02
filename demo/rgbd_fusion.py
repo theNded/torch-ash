@@ -39,7 +39,7 @@ class TSDFFusion:
         if not normalize_scene:
             self.grid = UnBoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=20000,  # TODO: make this configurable
+                num_embeddings=80000,  # TODO: make this configurable
                 embedding_dim=5,
                 grid_dim=8,  # TODO: make this configurable
                 cell_size=voxel_size,
@@ -51,10 +51,10 @@ class TSDFFusion:
         else:
             self.grid = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=1400000,
+                num_embeddings=80000,
                 embedding_dim=5,
-                grid_dim=1,
-                sparse_grid_dim=512,
+                grid_dim=8,
+                sparse_grid_dim=64,
                 bbox_min=-1 * torch.ones(3, device=self.device),
                 bbox_max=torch.ones(3, device=self.device),
                 device=self.device,

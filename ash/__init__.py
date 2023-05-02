@@ -15,14 +15,4 @@ from .multires_grid import BoundedMultiResGrid, UnBoundedMultiResGrid
 
 from .marching_cubes import marching_cubes
 
-# from .hashgrid import Query, HashGrid
-# from .renderer import Integrate
-
-# from .sampler import (
-#     ray_march_sample,
-#     uniform_continuous_sample,
-#     uniform_discrete_sample,
-#     importance_upsample,
-#     find_near_far,
-#     find_zero_crossing,
-# )
+from .mlp import SirenLayer, SirenNet
