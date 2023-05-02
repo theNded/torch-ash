@@ -47,12 +47,14 @@ class NeuralSDF(nn.Module):
         self.encoder_type = encoder
 
         if encoder == "ash":
+            sparse_grid_dim = resolution // 4
+            grid_dim = 4
             self.encoder = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=resolution**3,
+                num_embeddings=sparse_grid_dim ** 3,
                 embedding_dim=embedding_dim,
-                grid_dim=resolution,
-                sparse_grid_dim=1,
+                grid_dim=grid_dim,
+                sparse_grid_dim=sparse_grid_dim,
                 bbox_min=torch.zeros(3, dtype=torch.float32, device=device),
                 bbox_max=torch.ones(3, dtype=torch.float32, device=device),
                 device=device,
