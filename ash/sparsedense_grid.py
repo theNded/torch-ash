@@ -876,12 +876,12 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         self.bbox_min = (
             bbox_min.to(self.device)
             if bbox_min is not None
-            else -1 * torch.ones(3, device=self.device)
+            else -1 * torch.ones(self.in_dim, device=self.device)
         )
         self.bbox_max = (
             bbox_max.to(self.device)
             if bbox_max is not None
-            else torch.ones(3, device=self.device)
+            else torch.ones(self.in_dim, device=self.device)
         )
 
         self.cell_size = (self.bbox_max - self.bbox_min) / (
@@ -895,10 +895,10 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         masks = ((grid_coords >= 0) * (grid_coords < self.sparse_grid_dim)).all(dim=-1)
         return grid_coords[masks]
 
-    def full_init_(self):
+    def dense_init_(self):
         grid_coords = (
-            torch.stack(torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * 3))
-            .reshape(3, -1)
+            torch.stack(torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * self.in_dim))
+            .reshape(self.in_dim, -1)
             .T.to(self.device)
         )
 

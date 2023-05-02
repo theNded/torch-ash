@@ -124,6 +124,6 @@ class BoundedMultiResGrid(nn.Module):
             grid.spatial_init_(x, dilation)
 
     @torch.no_grad()
-    def full_init_(self):
+    def dense_init_(self):
         for grid in self.grids:
-            grid.full_init_()
+            grid.dense_init_()

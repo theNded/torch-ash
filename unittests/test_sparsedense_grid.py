@@ -223,7 +223,7 @@ class TestSparseDenseGrid:
             device=self.device,
         )
 
-        grid.full_init_()
+        grid.dense_init_()
 
 
 
@@ -488,7 +488,7 @@ class TestSparseDenseGrid:
             sparse_grid_dim=sparse_grid_dim,
             device=self.device,
         )
-        grid.full_init_()
+        grid.dense_init_()
         torch.nn.init.uniform_(grid.embeddings, -1, 1)
 
         # Must make sure that after perturbation, the query is still in the same cell

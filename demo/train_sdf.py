@@ -65,8 +65,8 @@ class NeuralPoisson(nn.Module):
     def spatial_init_(self, positions: torch.Tensor):
         self.grid.spatial_init_(positions, dilation=0)
 
-    def full_init_(self):
-        self.grid.full_init_()
+    def dense_init_(self):
+        self.grid.dense_init_()
 
     def sample(self, num_samples=10000):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
@@ -383,7 +383,7 @@ class NGP(nn.Module):
     def spatial_init_(self, x):
         pass
 
-    def full_init_(self):
+    def dense_init_(self):
         pass
 
     def marching_cubes(self, fname):
@@ -478,7 +478,7 @@ if __name__ == "__main__":
 
     # activate sparse grids
     # model.spatial_init_(torch.from_numpy(dataset.positions).cuda())
-    model.full_init_()
+    model.dense_init_()
 
     # o3d.visualization.draw(
     #     [dataset.pcd, model.bbox_lineset] + [model.visualize_occupied_cells()])

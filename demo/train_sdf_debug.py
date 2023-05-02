@@ -62,7 +62,7 @@ class NeuralSDF(nn.Module):
             nn.init.uniform_(self.encoder.embeddings, -1e-4, 1e-4)
 
             # Active all entries
-            self.encoder.full_init_()
+            self.encoder.dense_init_()
             print(self.encoder.engine.size())
 
         elif encoder == "ngp":
