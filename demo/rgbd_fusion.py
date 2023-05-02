@@ -269,7 +269,8 @@ if __name__ == "__main__":
     sdf = fuser.grid.embeddings[..., 0].contiguous()
     weight = fuser.grid.embeddings[..., 4].contiguous()
     mesh = fuser.grid.marching_cubes(
-        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn
+        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn,
+        iso_value=0.0, weight_thr=0.5
     )
     o3d.visualization.draw(mesh)
     print(f"sparse grid size before pruning: {fuser.grid.engine.size()}")
