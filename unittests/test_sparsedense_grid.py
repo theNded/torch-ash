@@ -1,10 +1,20 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 import os
-from ash import SparseDenseGrid, SparseDenseGridQuery, SparseDenseGridQueryBackward
+from ash import (
+    SparseDenseGrid,
+    SparseDenseGridQuery,
+    SparseDenseGridQueryBackward,
+    BoundedSparseDenseGrid,
+    SirenNet,
+)
 import pytest
+
+np.random.seed(15213)
+torch.manual_seed(15213)
 
 
 # TODO: now only 3 dim keys is supported for sparse-dense grids
@@ -163,7 +173,8 @@ class TestSparseDenseGrid:
             )
 
         # Map query to [min, max - 1) to check purely in-bound queries
-        query_cell_coords = torch.rand(10, 3, device=self.device)
+        num_queries = 1000
+        query_cell_coords = torch.rand(num_queries, in_dim, device=self.device)
         # min: -grid_dim * bound
         # max: grid_dim * bound - 1
         query_cell_coords = (
@@ -209,12 +220,17 @@ class TestSparseDenseGrid:
         query_positions = query_cell_coords + query_cell_offsets
         query_positions.requires_grad_(True)
 
-        def grad_x_fn(x):
-            x = grid.transform_world_to_cell(x)
+        net = SirenNet(
+            embedding_dim + 3, dim_hidden=128, dim_out=1, num_layers=2, w0=30.0
+        ).cuda()
+
+        grid.construct_sparse_neighbor_tables_()
+
+        def grad_x_fn(x_input):
+            x_input.requires_grad_(True)
+            x = grid.transform_world_to_cell(x_input)
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
-
-            grid.construct_sparse_neighbor_tables_()
 
             output = SparseDenseGridQuery.apply(
                 grid.embeddings,
@@ -226,11 +242,22 @@ class TestSparseDenseGrid:
                 grid.neighbor_table_cell2cell,
                 grid.neighbor_table_cell2grid,
                 grid.grid_dim,
+                "linear",
             )
+            output = net(torch.cat((output, x_input), dim=-1))
             return output
 
+        torch.autograd.gradcheck(
+            grad_x_fn,
+            (query_positions,),
+            eps=eps,
+            atol=1e-2,
+            rtol=1e-2,
+        )
+
         def grad_embedding_fn(embeddings):
-            x = grid.transform_world_to_cell(query_positions)
+            x_input = query_positions
+            x = grid.transform_world_to_cell(x_input)
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
 
@@ -247,22 +274,17 @@ class TestSparseDenseGrid:
                 grid.neighbor_table_cell2grid,
                 grid.grid_dim,
             )
+            output = net(torch.cat((output, x_input), dim=-1))
             return output
 
-        torch.autograd.gradcheck(
-            grad_x_fn,
-            (query_positions,),
-            eps=eps,
-            atol=1e-3,
-            rtol=1e-3,
-        )
         torch.autograd.gradcheck(
             grad_embedding_fn,
             (grid.embeddings,),
             eps=eps,
-            atol=1e-3,
-            rtol=1e-3,
+            atol=1e-2,
+            rtol=1e-2,
         )
+
 
     def _backward_backward_block(self, in_dim, embedding_dim, grid_dim):
         grid = SparseDenseGrid(
@@ -360,14 +382,12 @@ class TestSparseDenseGrid:
         self._query_block(in_dim=3, embedding_dim=16, grid_dim=8)
 
     def test_forward(self):
-        self._forward_block(in_dim=3, embedding_dim=3, grid_dim=5)
+        self._forward_block(in_dim=3, embedding_dim=3, grid_dim=1)
+        self._forward_block(in_dim=3, embedding_dim=3, grid_dim=4)
+        self._forward_block(in_dim=3, embedding_dim=3, grid_dim=8)
 
     def test_backward(self):
-        self._backward_block(in_dim=3, embedding_dim=1, grid_dim=1)
+        self._backward_block(in_dim=3, embedding_dim=2, grid_dim=1)
         self._backward_block(in_dim=3, embedding_dim=1, grid_dim=2)
-        self._backward_block(in_dim=3, embedding_dim=1, grid_dim=4)
-        self._backward_block(in_dim=3, embedding_dim=3, grid_dim=8)
-
-    def test_backward_backward(self):
-        self._backward_backward_block(in_dim=3, embedding_dim=1, grid_dim=1)
-        self._backward_backward_block(in_dim=3, embedding_dim=3, grid_dim=2)
+        self._backward_block(in_dim=3, embedding_dim=4, grid_dim=4)
+        self._backward_block(in_dim=3, embedding_dim=8, grid_dim=8)

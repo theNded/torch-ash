@@ -10,132 +10,10 @@ from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
 
-# helpers
-
-
-def exists(val):
-    return val is not None
-
-
-def cast_tuple(val, repeat=1):
-    return val if isinstance(val, tuple) else ((val,) * repeat)
-
-
-# sin activation
-
-
-class Sine(nn.Module):
-    def __init__(self, w0=1.0):
-        super().__init__()
-        self.w0 = w0
-
-    def forward(self, x):
-        return torch.sin(self.w0 * x)
-
-
-# siren layer
-
-
-class Siren(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_out,
-        w0=1.0,
-        c=6.0,
-        is_first=False,
-        use_bias=True,
-        activation=None,
-    ):
-        super().__init__()
-        self.dim_in = dim_in
-        self.is_first = is_first
-
-        weight = torch.zeros(dim_out, dim_in)
-        bias = torch.zeros(dim_out) if use_bias else None
-        self.init_(weight, bias, c=c, w0=w0)
-
-        self.weight = nn.Parameter(weight)
-        self.bias = nn.Parameter(bias) if use_bias else None
-        self.activation = Sine(w0) if activation is None else activation
-
-    def init_(self, weight, bias, c, w0):
-        dim = self.dim_in
-
-        w_std = (1 / dim) if self.is_first else (math.sqrt(c / dim) / w0)
-        weight.uniform_(-w_std, w_std)
-
-        if exists(bias):
-            bias.uniform_(-w_std, w_std)
-
-    def forward(self, x):
-        out = F.linear(x, self.weight, self.bias)
-        out = self.activation(out)
-        return out
-
-
-# siren network
-
-
-class SirenNet(nn.Module):
-    def __init__(
-        self,
-        dim_in,
-        dim_hidden,
-        dim_out,
-        num_layers,
-        w0=1.0,
-        w0_initial=30.0,
-        use_bias=True,
-        final_activation=None,
-    ):
-        super().__init__()
-        self.num_layers = num_layers
-        self.dim_hidden = dim_hidden
-
-        self.layers = nn.ModuleList([])
-        for ind in range(num_layers):
-            is_first = ind == 0
-            layer_w0 = w0_initial if is_first else w0
-            layer_dim_in = dim_in if is_first else dim_hidden
-
-            self.layers.append(
-                Siren(
-                    dim_in=layer_dim_in,
-                    dim_out=dim_hidden,
-                    w0=layer_w0,
-                    use_bias=use_bias,
-                    is_first=is_first,
-                )
-            )
-
-        final_activation = (
-            nn.Identity() if not exists(final_activation) else final_activation
-        )
-        self.last_layer = Siren(
-            dim_in=dim_hidden,
-            dim_out=dim_out,
-            w0=w0,
-            use_bias=use_bias,
-            activation=final_activation,
-        )
-
-    def forward(self, x, mods=None):
-        mods = cast_tuple(mods, self.num_layers)
-
-        for layer, mod in zip(self.layers, mods):
-            x = layer(x)
-
-            if exists(mod):
-                x *= rearrange(mod, "d -> () d")
-
-        return self.last_layer(x)
-
-
+# temporary helpers
+# TODO: replace them with versatile torch-ash MarchingCubes
 """From the DeepSDF repository https://github.com/facebookresearch/DeepSDF
 """
-
-
 def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=None):
     start = time.time()
     ply_filename = filename
@@ -143,8 +21,9 @@ def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=No
     # decoder.eval()
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
-    voxel_origin = [-1, -1, -1]
-    voxel_size = 2.0 / (N - 1)
+    eps = 1e-2
+    voxel_origin = [-1 + eps, -1 + eps, -1 + eps]
+    voxel_size = 2.0 * (1 - eps) / (N - 1)
 
     overall_index = torch.arange(0, N**3, 1, out=torch.LongTensor())
     samples = torch.zeros(N**3, 4)
@@ -269,39 +148,3 @@ def convert_sdf_samples_to_ply(
     )
 
 
-class SirenMLP(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden_dim, num_layers, device):
-        super().__init__()
-        self.net = SirenNet(
-            dim_in=in_dim,
-            dim_hidden=hidden_dim,
-            dim_out=out_dim,
-            num_layers=num_layers,
-            w0=30.0,
-        ).to(device)
-
-    def forward(self, x):
-        x.requires_grad_(True)
-
-        sdf = self.net(x)
-        grad_x = torch.autograd.grad(
-            outputs=sdf[..., 0],
-            inputs=x,
-            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
-            create_graph=True,
-            retain_graph=True,
-            only_inputs=True,
-        )[0]
-
-        return sdf, grad_x, torch.ones_like(sdf, dtype=torch.bool).squeeze()
-
-    def spatial_init_(self, x):
-        # TOOD(wei): initialize a sparse-dense grid only for sampling
-        pass
-
-    def sample(self, num_samples):
-        sample_coords = np.random.uniform(-1, 1, size=(num_samples, 3))
-        return torch.from_numpy(sample_coords).float().cuda()
-
-    def marching_cubes(self, fname):
-        create_mesh(self.net, fname, N=256, max_batch=64**3, offset=None, scale=None)

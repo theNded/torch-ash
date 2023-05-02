@@ -61,7 +61,7 @@ struct functor_t {
         AT_ERROR("Unknown interpolation functor: ", name);         \
     }
 
-const float kInterpSumWeightThreshold = 0.5;
+const float kInterpSumWeightThreshold = 0.99999;
 
 // Now only dispatch dtypes, all the queries are for 3D
 // TODO: dispatch for 2D/4D later
@@ -98,14 +98,16 @@ __global__ void query_forward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    // TODO: dispatch or better serialization
-    MiniVec<scalar_t, 16> sum_output = MiniVec<scalar_t, 16>::zeros();
-    scalar_t sum_weight = 0.0;
+    // TODO: dispatch feature dims for efficient caching
+    MiniVec<scalar_t, 16> local_sum_output = MiniVec<scalar_t, 16>::zeros();
+
+    // TODO: revisit strategies for boundary voxels with less than 8 neighbors
+    // At current: return directly
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            continue;
+            return;
         }
 
         scalar_t weight = 1.0;
@@ -119,32 +121,26 @@ __global__ void query_forward_kernel(
         int base_idx =
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
         for (int k = 0; k < embedding_dims; ++k) {
-            sum_output[k] += weight * embeddings[base_idx + k];
+            local_sum_output[k] += weight * embeddings[base_idx + k];
         }
-        sum_weight += weight;
     }
 
-    if (sum_weight < kInterpSumWeightThreshold) {
-        return;
-    }
-
+    // From local to global memory
     for (int k = 0; k < embedding_dims; ++k) {
-        output[i * embedding_dims + k] = sum_output[k] / sum_weight;
+        output[i * embedding_dims + k] = local_sum_output[k];
     }
 }
 
-at::Tensor query_forward(
-        const at::Tensor&
-                embeddings,  // (num_embeddings, dense_res^3, embedding_dims)
-        const at::Tensor& offsets,
-        const at::Tensor& grid_indices,
-        const at::Tensor& cell_indices,
-        const at::Tensor& masks,
-        const at::Tensor& neighbor_table_grid2grid,
-        const at::Tensor& neighbor_table_cell2cell,
-        const at::Tensor& neighbor_table_cell2grid,
-        const int64_t grid_dim,
-        const std::string& interpolation) {
+at::Tensor query_forward(const at::Tensor& embeddings,
+                         const at::Tensor& offsets,
+                         const at::Tensor& grid_indices,
+                         const at::Tensor& cell_indices,
+                         const at::Tensor& masks,
+                         const at::Tensor& neighbor_table_grid2grid,
+                         const at::Tensor& neighbor_table_cell2cell,
+                         const at::Tensor& neighbor_table_cell2grid,
+                         const int64_t grid_dim,
+                         const std::string& interpolation) {
     // TODO: wise block-thread unrolling
     const int64_t len = grid_indices.size(0);
 
@@ -214,33 +210,20 @@ __global__ void query_backward_forward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    scalar_t sum_weight = 0.0;
+    // Quick neighbor check without polluting output
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            continue;
+            return;
         }
-
-        scalar_t weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (cell_nb >> d) & 1;
-            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            scalar_t w = interp_fn(x);
-            weight *= w;
-        }
-        sum_weight += weight;
-    }
-    if (sum_weight < kInterpSumWeightThreshold) {
-        return;
     }
 
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
+
+        // -1 should never happen
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
 
         scalar_t weight = 1.0;
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
@@ -262,13 +245,12 @@ __global__ void query_backward_forward_kernel(
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
 
         scalar_t dot = 0.0;
-        scalar_t normalized_weight = weight / sum_weight;
         for (int k = 0; k < embedding_dims; ++k) {
-            atomicAdd(&grad_embeddings[base_idx + k],
-                      normalized_weight * z[i * embedding_dims + k]);
-            dot += embeddings[base_idx + k] * z[i * embedding_dims + k];
+            scalar_t z_k = z[i * embedding_dims + k];
+            atomicAdd(&grad_embeddings[base_idx + k], weight * z_k);
+            dot += embeddings[base_idx + k] * z_k;
         }
-        grad_offsets[i] += (dot / sum_weight) * weight_grad;
+        grad_offsets[i] += dot * weight_grad;
     }
 };
 
@@ -291,7 +273,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
 
     const int64_t embedding_dims = embeddings.size(2);
     const int64_t num_cells_per_grid = embeddings.size(1);
-
     at::Tensor grad_embeddings = at::zeros_like(embeddings);
     at::Tensor grad_offsets = at::zeros_like(offsets, embeddings.dtype());
 
@@ -320,7 +301,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
                 });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
-
     return std::make_tuple(grad_embeddings, grad_offsets);
 }
 
@@ -328,6 +308,7 @@ template <typename InterpFunctor, typename DiffInterpFunctor, typename scalar_t>
 __global__ void query_backward_backward_kernel(
         const MiniVec<scalar_t, 3>* __restrict__ grad_grad_offset,
         const scalar_t* __restrict__ z,
+        const scalar_t* __restrict__ embeddings,
         const MiniVec<float, 3>* __restrict__ offsets,
         const int64_t* __restrict__ grid_indices,
         const int64_t* __restrict__ cell_indices,
@@ -335,6 +316,7 @@ __global__ void query_backward_backward_kernel(
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_grid2grid,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2cell,
         const MiniVec<int64_t, 8>* __restrict__ neighbor_table_cell2grid,
+        scalar_t* __restrict__ grad_z,
         scalar_t* __restrict__ grad_embeddings,
         MiniVec<scalar_t, 3>* __restrict__ grad_offsets,
         const int64_t grid_dim,
@@ -360,32 +342,20 @@ __global__ void query_backward_backward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    scalar_t sum_weight = 0.0;
+    // Quick neighbor check
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            continue;
+            return;
         }
-
-        scalar_t weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (cell_nb >> d) & 1;
-            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            weight *= interp_fn(x);
-        }
-        sum_weight += weight;
-    }
-    if (sum_weight < kInterpSumWeightThreshold) {
-        return;
     }
 
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
+
+        // Should never be -1
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
 
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
         for (int d = 0; d < 3; ++d) {
@@ -404,15 +374,17 @@ __global__ void query_backward_backward_kernel(
         int base_idx_rhs = i * embedding_dims;
 
         scalar_t dot = weight_grad.dot(grad_grad_offset[i]);
-        scalar_t factor = dot / sum_weight;
         for (int k = 0; k < embedding_dims; ++k) {
             atomicAdd(&grad_embeddings[base_idx_lhs + k],
-                      factor * z[base_idx_rhs + k]);
+                      dot * z[base_idx_rhs + k]);
+
+            // TODO: put it in a local feature as well
+            grad_z[base_idx_rhs + k] += dot * embeddings[base_idx_lhs + k];
         }
     }
 };
 
-std::tuple<at::Tensor, at::Tensor> query_backward_backward(
+std::tuple<at::Tensor, at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& grad_grad_embeddings,
         const at::Tensor& grad_grad_offset,
         const at::Tensor& z,
@@ -437,6 +409,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
     const int64_t embedding_dims = embeddings.size(2);
     const int64_t num_cells_per_grid = embeddings.size(1);
 
+    at::Tensor grad_z = at::zeros_like(z);
     at::Tensor grad_embeddings = at::zeros_like(embeddings);
 
     // ignored for now
@@ -452,6 +425,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
                             static_cast<MiniVec<scalar_t, 3>*>(
                                     grad_grad_offset.data_ptr()),
                             z.data_ptr<scalar_t>(),
+                            embeddings.data_ptr<scalar_t>(),
                             static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
                             grid_indices.data_ptr<int64_t>(),
                             cell_indices.data_ptr<int64_t>(),
@@ -462,6 +436,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
                                     neighbor_table_cell2cell.data_ptr()),
                             static_cast<MiniVec<int64_t, 8>*>(
                                     neighbor_table_cell2grid.data_ptr()),
+                            grad_z.data_ptr<scalar_t>(),
                             grad_embeddings.data_ptr<scalar_t>(),
                             static_cast<MiniVec<scalar_t, 3>*>(
                                     grad_offsets.data_ptr()),
@@ -470,7 +445,7 @@ std::tuple<at::Tensor, at::Tensor> query_backward_backward(
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    return std::make_tuple(grad_embeddings, grad_offsets);
+    return std::make_tuple(grad_z, grad_embeddings, grad_offsets);
 }
 
 template <typename scalar_t>

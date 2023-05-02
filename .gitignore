@@ -141,3 +141,4 @@ runs/
 *.ply
 *.sens
 .ccls-cache/
+logs/
