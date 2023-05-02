@@ -98,15 +98,16 @@ __global__ void query_forward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    // TODO: dispatch or better serialization
-    MiniVec<scalar_t, 16> sum_output = MiniVec<scalar_t, 16>::zeros();
-    scalar_t sum_weight = 0.0;
+    // TODO: dispatch feature dims for efficient caching
+    MiniVec<scalar_t, 16> local_sum_output = MiniVec<scalar_t, 16>::zeros();
+
+    // TODO: revisit strategies for boundary voxels with less than 8 neighbors
+    // At current: return directly
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            printf("forward forward: invalid neighbor\n");
-            continue;
+            return;
         }
 
         scalar_t weight = 1.0;
@@ -120,33 +121,26 @@ __global__ void query_forward_kernel(
         int base_idx =
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
         for (int k = 0; k < embedding_dims; ++k) {
-            sum_output[k] += weight * embeddings[base_idx + k];
+            local_sum_output[k] += weight * embeddings[base_idx + k];
         }
-        sum_weight += weight;
     }
 
-    if (sum_weight < kInterpSumWeightThreshold) {
-        printf("forward: invalid sum weight: %f\n", sum_weight);
-        return;
-    }
-
+    // From local to global memory
     for (int k = 0; k < embedding_dims; ++k) {
-        output[i * embedding_dims + k] = sum_output[k];
+        output[i * embedding_dims + k] = local_sum_output[k];
     }
 }
 
-at::Tensor query_forward(
-        const at::Tensor&
-                embeddings,  // (num_embeddings, dense_res^3, embedding_dims)
-        const at::Tensor& offsets,
-        const at::Tensor& grid_indices,
-        const at::Tensor& cell_indices,
-        const at::Tensor& masks,
-        const at::Tensor& neighbor_table_grid2grid,
-        const at::Tensor& neighbor_table_cell2cell,
-        const at::Tensor& neighbor_table_cell2grid,
-        const int64_t grid_dim,
-        const std::string& interpolation) {
+at::Tensor query_forward(const at::Tensor& embeddings,
+                         const at::Tensor& offsets,
+                         const at::Tensor& grid_indices,
+                         const at::Tensor& cell_indices,
+                         const at::Tensor& masks,
+                         const at::Tensor& neighbor_table_grid2grid,
+                         const at::Tensor& neighbor_table_cell2cell,
+                         const at::Tensor& neighbor_table_cell2grid,
+                         const int64_t grid_dim,
+                         const std::string& interpolation) {
     // TODO: wise block-thread unrolling
     const int64_t len = grid_indices.size(0);
 
@@ -216,35 +210,20 @@ __global__ void query_backward_forward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    scalar_t sum_weight = 0.0;
+    // Quick neighbor check without polluting output
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            printf("backward forward: invalid neighbor\n");
-            continue;
+            return;
         }
-
-        scalar_t weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (cell_nb >> d) & 1;
-            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            scalar_t w = interp_fn(x);
-            weight *= w;
-        }
-        sum_weight += weight;
-    }
-    if (sum_weight < kInterpSumWeightThreshold) {
-        printf("backward forward: invalid sum weight: %f\n", sum_weight);
-        return;
     }
 
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
+
+        // -1 should never happen
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
 
         scalar_t weight = 1.0;
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
@@ -266,11 +245,10 @@ __global__ void query_backward_forward_kernel(
                 (grid_nb_idx * cells_per_grid + cell_nb_idx) * embedding_dims;
 
         scalar_t dot = 0.0;
-        scalar_t normalized_weight = weight;
         for (int k = 0; k < embedding_dims; ++k) {
-            atomicAdd(&grad_embeddings[base_idx + k],
-                      normalized_weight * z[i * embedding_dims + k]);
-            dot += embeddings[base_idx + k] * z[i * embedding_dims + k];
+            scalar_t z_k = z[i * embedding_dims + k];
+            atomicAdd(&grad_embeddings[base_idx + k], weight * z_k);
+            dot += embeddings[base_idx + k] * z_k;
         }
         grad_offsets[i] += dot * weight_grad;
     }
@@ -289,19 +267,14 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const int64_t grid_dim,
         const std::string& interpolation) {
     const int64_t len = grid_indices.size(0);
-    // printf("len: %ld\n", len);
 
     const int64_t threads = 256;
     const int64_t blocks = (len + threads - 1) / threads;
 
     const int64_t embedding_dims = embeddings.size(2);
     const int64_t num_cells_per_grid = embeddings.size(1);
-    // printf("embedding_dims: %ld\n", embedding_dims);
-    // printf("num_cells_per_grid: %ld\n", num_cells_per_grid);
-
     at::Tensor grad_embeddings = at::zeros_like(embeddings);
     at::Tensor grad_offsets = at::zeros_like(offsets, embeddings.dtype());
-    // std::cout << "init grad_offsets: " << grad_offsets << std::endl;
 
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_forward_kernel", [&] {
@@ -328,7 +301,6 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
                 });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
-    // std::cout << "computed grad_offsets: " << grad_offsets << std::endl;
     return std::make_tuple(grad_embeddings, grad_offsets);
 }
 
@@ -370,34 +342,20 @@ __global__ void query_backward_backward_kernel(
     const MiniVec<int64_t, 8>& neighbor_cell2grid =
             neighbor_table_cell2grid[cell_idx];
 
-    scalar_t sum_weight = 0.0;
+    // Quick neighbor check
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
         if (grid_nb_idx == -1) {
-            printf("backward backward: invalid neighbor\n");
-            continue;
+            return;
         }
-
-        scalar_t weight = 1.0;
-        for (int d = 0; d < 3; ++d) {
-            int dim_code = (cell_nb >> d) & 1;
-            scalar_t x = (dim_code) ? (offset[d]) : (1 - offset[d]);
-            weight *= interp_fn(x);
-        }
-        sum_weight += weight;
-    }
-    if (sum_weight < kInterpSumWeightThreshold) {
-        printf("backward backward: invalid sum weight: %f\n", sum_weight);
-        return;
     }
 
     for (int cell_nb = 0; cell_nb < 8; ++cell_nb) {
         int grid_nb = neighbor_cell2grid[cell_nb];
+
+        // Should never be -1
         int grid_nb_idx = neighbor_grid2grid[grid_nb];
-        if (grid_nb_idx == -1) {
-            continue;
-        }
 
         MiniVec<scalar_t, 3> weight_grad = MiniVec<scalar_t, 3>::ones();
         for (int d = 0; d < 3; ++d) {
@@ -416,11 +374,12 @@ __global__ void query_backward_backward_kernel(
         int base_idx_rhs = i * embedding_dims;
 
         scalar_t dot = weight_grad.dot(grad_grad_offset[i]);
-        scalar_t factor = dot;
         for (int k = 0; k < embedding_dims; ++k) {
             atomicAdd(&grad_embeddings[base_idx_lhs + k],
-                      factor * z[base_idx_rhs + k]);
-            grad_z[base_idx_rhs + k] += factor * embeddings[base_idx_lhs + k];
+                      dot * z[base_idx_rhs + k]);
+
+            // TODO: put it in a local feature as well
+            grad_z[base_idx_rhs + k] += dot * embeddings[base_idx_lhs + k];
         }
     }
 };

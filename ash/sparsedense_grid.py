@@ -112,10 +112,6 @@ class SparseDenseGridQuery(torch.autograd.Function):
         ctx.grid_dim = grid_dim
         ctx.interpolation = interpolation
 
-        # print('forward: ')
-        # print(f"grid_indices: {grid_indices}, cell_indices: {cell_indices}")
-        print('foward check')
-        print(f'embeddings: {embeddings.is_contiguous()}, offsets: {offsets.is_contiguous()}, grid_indices: {grid_indices.is_contiguous()}, cell_indices: {cell_indices.is_contiguous()}, masks: {masks.is_contiguous()}, neighbor_table_grid2grid: {neighbor_table_grid2grid.is_contiguous()}, neighbor_table_cell2cell: {neighbor_table_cell2cell.is_contiguous()}, neighbor_table_cell2grid: {neighbor_table_cell2grid.is_contiguous()}')
         y = backend.query_forward(
             embeddings,
             offsets,
@@ -148,10 +144,8 @@ class SparseDenseGridQuery(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
-        # print('[backward]')
-        # print(f'z: {z} offsets: {offsets}')
         grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
-            z,
+            z.contiguous(),
             embeddings,
             offsets,
             grid_indices,
@@ -163,7 +157,7 @@ class SparseDenseGridQuery(torch.autograd.Function):
             ctx.grid_dim,
             ctx.interpolation,
         )
-        # print(f'grad_offsets: {grad_offsets}')
+
         return (
             grad_embeddings,
             grad_offsets,
@@ -225,7 +219,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
             grad_offsets: (num_queries, 3)
         """
-        z = z.contiguous()
         ctx.save_for_backward(
             z,
             embeddings,
@@ -240,12 +233,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         ctx.grid_dim = grid_dim
         ctx.interpolation = interpolation
 
-        # print('[[backward-forward]]')
-        # print('[Input]')
-        # print(f'z: {z}', z.is_contiguous())
-        # print(f'offsets: {offsets}')
-        print('backward forward contiguous check')
-        print(f'z: {z.is_contiguous()}, embeddings: {embeddings.is_contiguous()}, offsets: {offsets.is_contiguous}, grid_indices: {grid_indices.is_contiguous()}, cell_indices: {cell_indices.is_contiguous()}, masks: {masks.is_contiguous()}, neighbor_table_grid2grid: {neighbor_table_grid2grid.is_contiguous()}, neighbor_table_cell2cell: {neighbor_table_cell2cell.is_contiguous()}, neighbor_table_cell2grid: {neighbor_table_cell2grid.is_contiguous()}')
         grad_embeddings, grad_offsets = backend.query_backward_forward(
             z,
             embeddings,
@@ -259,10 +246,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_dim,
             interpolation,
         )
-        print('[Output]')
-        print(f'grad_offsets: {grad_offsets}')
-
-
         return grad_embeddings, grad_offsets
 
     @staticmethod
@@ -311,15 +294,6 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             neighbor_table_cell2grid,
         ) = ctx.saved_tensors
 
-        # print(
-        #     "backward backward --------------------------------------",
-        #     f"grad_grad_embeddings: {grad_grad_embeddings.nonzero()}",
-        #     f"grad_grad_offsets={grad_grad_offsets.nonzero()}",
-        #     f"z={z.nonzero()}",
-        # )
-        # Safely ignore dL_(dLdembedding) as dLdembedding is not used in the forward pass
-        print('backward-backward check')
-        print(f'grad_grad_embeddings: {grad_grad_embeddings.is_contiguous()}, grad_grad_offsets: {grad_grad_offsets.is_contiguous()}, z: {z.is_contiguous()}, embeddings: {embeddings.is_contiguous()}, offsets: {offsets.is_contiguous()}, grid_indices: {grid_indices.is_contiguous()}, cell_indices: {cell_indices.is_contiguous()}, masks: {masks.is_contiguous()}, neighbor_table_grid2grid: {neighbor_table_grid2grid.is_contiguous()}, neighbor_table_cell2cell: {neighbor_table_cell2cell.is_contiguous()}, neighbor_table_cell2grid: {neighbor_table_cell2grid.is_contiguous()}')
         grad_z, grad_embeddings, grad_offsets = backend.query_backward_backward(
             grad_grad_embeddings,
             grad_grad_offsets,
@@ -336,11 +310,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             ctx.interpolation,
         )
         return (
-            # torch.ones_like(z),
             grad_z,
             grad_embeddings,
             None,
-            # 1e10 * torch.ones_like(grad_offsets),
             None,
             None,
             None,
