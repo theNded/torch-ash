@@ -188,7 +188,9 @@ if __name__ == "__main__":
     )
 
     if args.model == "ash":
-        model.encoder.spatial_init_(torch.from_numpy(dataset.positions).cuda())
+        model.encoder.spatial_init_(
+            torch.from_numpy(dataset.positions).cuda(), dilation=1, bidirectional=True
+        )
         occupied_cells = model.visualize_occupied_cells()
         o3d.visualization.draw(occupied_cells + [dataset.pcd, bbox_lineset])
 

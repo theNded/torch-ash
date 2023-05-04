@@ -593,7 +593,9 @@ class SparseDenseGrid(ASHModule):
         """Placeholder for bounded version"""
         return grid_coords
 
-    def spatial_init_(self, points: torch.Tensor, dilation: int = 1) -> None:
+    def spatial_init_(
+        self, points: torch.Tensor, dilation: int = 1, bidirectional: bool = False
+    ) -> None:
         """Initialize the grid with points in the world coordinate system.
         Args:
             keys: (N, in_dim) tensor of points in the world coordinate system
@@ -608,7 +610,7 @@ class SparseDenseGrid(ASHModule):
         grid_coords = self.grids_in_bound(grid_coords)
 
         neighbor_coord_offsets = enumerate_neighbors(
-            self.in_dim, dilation, bidirectional=True
+            self.in_dim, dilation, bidirectional=bidirectional
         ).to(self.device)
         grid_coords_with_neighbors = (
             grid_coords.view(-1, 1, 3) + neighbor_coord_offsets
@@ -896,7 +898,9 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
 
     def dense_init_(self):
         grid_coords = (
-            torch.stack(torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * self.in_dim))
+            torch.stack(
+                torch.meshgrid(*[torch.arange(self.sparse_grid_dim)] * self.in_dim)
+            )
             .reshape(self.in_dim, -1)
             .T.to(self.device)
         )
