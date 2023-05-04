@@ -33,7 +33,7 @@ class TSDFFusion:
 
     def __init__(
         self,
-        voxel_size: float = 0.01,
+        voxel_size: float = 0.02,
         normalize_scene: bool = True,
     ):
         if not normalize_scene:
@@ -54,18 +54,17 @@ class TSDFFusion:
                 num_embeddings=80000,
                 embedding_dim=5,
                 grid_dim=8,
-                sparse_grid_dim=64,
+                sparse_grid_dim=32,
                 bbox_min=-1 * torch.ones(3, device=self.device),
                 bbox_max=torch.ones(3, device=self.device),
                 device=self.device,
             )
-
             self.voxel_size = self.grid.cell_size[0]
             print(
                 f"Use normalized scene with non-metric voxel size {self.voxel_size} in bounding box"
             )
 
-        self.trunc = 4 * self.voxel_size
+        self.trunc = 5 * self.voxel_size
 
     @torch.no_grad()
     def fuse_dataset(self, dataset):
@@ -172,7 +171,7 @@ class TSDFFusion:
             cell_coords,
             grid_indices,
             cell_indices,
-        ) = self.grid.spatial_init_(points)
+        ) = self.grid.spatial_init_(points, dilation=1)
         if len(grid_indices) == 0:
             return
 
@@ -212,36 +211,25 @@ class TSDFFusion:
 if __name__ == "__main__":
     import argparse
 
+    # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
-    parser.add_argument(
-        "--depth_scale",
-        type=float,
-        default=1e-3,
-        help="scale from depth pixel value to meters",
-    )
-    parser.add_argument(
-        "--depth_max",
-        type=float,
-        default=4.0,
-        help="max depth value to truncate in meters",
-    )
-    parser.add_argument(
-        "--normalize_scene",
-        action="store_true",
-        help="Normalize scene into the [0, 1] bounding box",
-    )
+    parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
+    parser.add_argument("--depth_max", type=float, default=4.0, help="max depth value to truncate in meters")
+    parser.add_argument("--voxel_size", type=float, default=0.02, help="voxel size in meters in the metric space")
+    parser.add_argument("--normalize_scene", action="store_true", help="Normalize scene into the [0, 1] bounding box")
     args = parser.parse_args()
+    # fmt: on
 
     # Load data
     dataset = ImageDataset(
         args.path,
-        depth_scale=args.depth_scale,
+        depth_type=args.depth_type,
         depth_max=args.depth_max,
         normalize_scene=args.normalize_scene,
         image_only=True,
     )
-    fuser = TSDFFusion(0.01, args.normalize_scene)
+    fuser = TSDFFusion(args.voxel_size, args.normalize_scene)
 
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
@@ -269,8 +257,13 @@ if __name__ == "__main__":
     sdf = fuser.grid.embeddings[..., 0].contiguous()
     weight = fuser.grid.embeddings[..., 4].contiguous()
     mesh = fuser.grid.marching_cubes(
-        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn,
-        iso_value=0.0, weight_thr=0.5
+        sdf,
+        weight,
+        vertices_only=False,
+        color_fn=color_fn,
+        normal_fn=normal_fn,
+        iso_value=0.0,
+        weight_thr=0.5,
     )
     o3d.visualization.draw(mesh)
     print(f"sparse grid size before pruning: {fuser.grid.engine.size()}")

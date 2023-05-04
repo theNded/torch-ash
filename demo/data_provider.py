@@ -1,3 +1,4 @@
+from typing import Union, Literal
 import numpy as np
 
 import torch
@@ -40,8 +41,8 @@ def load_image(fname, im_type="image"):
         data = np.load(fname)
         if data.shape[0] in [1, 3]:  # normal or depth transposed
             data = data.transpose((1, 2, 0))
-        if len(data.shape) == 2:  # depth squeezed
-            data = np.expand_dims(data, axis=-1)
+        if im_type == "depth":
+            data = data.squeeze()
         return data
     elif fname.suffix in [".jpg", ".jpeg", ".png", ".pgm"]:
         if im_type == "image":
@@ -124,17 +125,18 @@ class ImageDataset(torch.utils.data.Dataset):
     TODO: follow nerfstudio and add more flexibility with cached dataloader
     """
 
-    # pixel value * depth_scale = depth in meters
+    # pixel value * depth_scales = depth in meters
     def __init__(
         self,
         path,
-        depth_scale=1e-3,
-        depth_max=4.0,
-        normalize_scene=True,
-        image_only=False,
+        depth_type: Literal["sensor", "learned"] = "sensor",
+        depth_max: float = 4.0,
+        normalize_scene: bool = True,
+        image_only: bool = False,
     ):
         self.path = Path(path)
-        self.depth_scale = depth_scale
+
+        self.depth_type = depth_type
         self.depth_max = depth_max
         self.image_only = image_only
 
@@ -142,15 +144,32 @@ class ImageDataset(torch.utils.data.Dataset):
         self.image_fnames = get_image_files(
             self.path, folders=["image", "color"], exts=["png", "jpg"]
         )
-        self.depth_fnames = get_image_files(
-            self.path, folders=["depth"], exts=["png", "pgm", "npy"]
-        )
+
+        if self.depth_type == "sensor":
+            self.depth_fnames = get_image_files(
+                self.path, folders=["depth"], exts=["png", "pgm"]
+            )
+            self.depth_scales = np.ones(len(self.depth_fnames)) * 1e-3
+
+        elif self.depth_type == "learned":
+            # TODO: change it accordingly, if it uses RealSense or TUM scales
+            self.depth_fnames = get_image_files(
+                self.path, folders=["omni_depth"], exts=["npy"]
+            )
+            self.depth_scales = np.loadtxt(self.path / "depth_scales.txt")
+            assert len(self.depth_scales) == len(
+                self.depth_fnames
+            ), "Please ensure learned depth is generated and its scale is estimated."
+
+        else:
+            raise ValueError(f"unknown depth type {self.depth_type}")
+
         self.normal_fnames = get_image_files(
             self.path, folders=["omni_normal"], exts=["npy"]
         )
 
         # Load intrinsics and poses
-        self.intrinsic = np.loadtxt(self.path / "intrinsic_depth.txt").reshape((3, 3))
+        self.intrinsic = np.loadtxt(self.path / "intrinsic.txt").reshape((3, 3))
         self.poses_unnormalized = np.loadtxt(self.path / "poses.txt").reshape(
             (-1, 4, 4)
         )
@@ -183,7 +202,7 @@ class ImageDataset(torch.utils.data.Dataset):
         self.depth_ims = np.stack(depth_ims)
         self.rgb_ims = np.stack(rgb_ims)
         self.normal_ims = np.stack(normal_ims) if len(normal_ims) > 0 else None
-        self.num_images, self.H, self.W = self.depth_ims.shape
+        self.num_images, self.H, self.W = self.depth_ims.shape[:3]
         assert self.rgb_ims.shape == (self.num_images, self.H, self.W, 3)
         assert self.normal_ims is None or self.normal_ims.shape == (
             self.num_images,
@@ -203,7 +222,7 @@ class ImageDataset(torch.utils.data.Dataset):
             self.center = (min_vertices + max_vertices) / 2.0
 
             self.scale = 2.0 / (np.max(max_vertices - min_vertices) + 3.0)
-            self.depth_scale *= self.scale
+            self.depth_scales *= self.scale
             self.depth_max *= self.scale
             print(f"Normalize scene with scale {self.scale} and center {self.center}m")
 
@@ -257,6 +276,7 @@ class ImageDataset(torch.utils.data.Dataset):
 
         self.depths = self.depth_ims.reshape(-1, 1).astype(np.float32)
         self.rgbs = self.rgb_ims.reshape(-1, 3).astype(np.float32)
+        self.depth_scales = self.depth_scales.reshape(-1, 1).astype(np.float32)
         if self.normal_ims is not None:
             self.normals = []
             pbar = tqdm(range(len(self.image_fnames)))
@@ -272,7 +292,7 @@ class ImageDataset(torch.utils.data.Dataset):
         return {
             "rgb": self.rgb_ims[idx],
             "depth": self.depth_ims[idx],
-            "depth_scale": self.depth_scale,
+            "depth_scale": self.depth_scales[idx],
             "depth_max": self.depth_max,
             "normal": self.normal_ims[idx] if self.normal_ims is not None else None,
             "pose": self.poses[idx],
@@ -297,7 +317,7 @@ class ImageDataset(torch.utils.data.Dataset):
             "rays_d": self.rays_d[idx],  # (N, 3)
             "rays_d_norm": self.rays_d_norm[idx],  # (N, 1)
             "depth": self.depths[idx],  # (N, 1)
-            "depth_scale": self.depth_scale,
+            "depth_scale": self.depth_scales[view_idx],  # (N, 1)
             "rgb": self.rgbs[idx],  # (N, 3)
             "normal": self.normals[idx]
             if self.normal_ims is not None
@@ -361,10 +381,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", required=True, choices=["pointcloud", "image"])
     parser.add_argument("--path", required=True)
+    parser.add_argument("--depth_type", default="sensor", choices=["sensor", "learned"])
     args = parser.parse_args()
 
     if args.dataset == "image":
-        dataset = ImageDataset(args.path, normalize_scene=True)
+        dataset = ImageDataset(
+            args.path, depth_type=args.depth_type, normalize_scene=True
+        )
 
         batch_size = dataset.H * dataset.W
         dataloader = Dataloader(dataset, batch_size=batch_size, shuffle=True)
@@ -374,12 +397,11 @@ if __name__ == "__main__":
             data = next(iter(dataloader))
 
             positions = data["rays_o"] + data["rays_d"] * (
-                data["depth"] * data["rays_d_norm"] * data["depth_scale"]
+                data["depth"] * data["depth_scale"] * data["rays_d_norm"]
             )
             rgbs = data["rgb"]
             normals = data["normal"]
 
-            print(positions.dtype, rgbs.dtype, normals.dtype)
             pcd = o3d.t.geometry.PointCloud(to_o3d(positions))
             pcd.point.colors = to_o3d(rgbs)
             pcd.point.normals = to_o3d(normals)
@@ -392,7 +414,11 @@ if __name__ == "__main__":
         dataset = PointCloudDataset(args.path, normalize_scene=True)
 
         batch_size = dataset.num_points // 50
-        dataloader = Dataloader(dataset, batch_size=batch_size, shuffle=True)
+        dataloader = Dataloader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=True,
+        )
 
         geometries = []
         for i in tqdm(range(20)):
