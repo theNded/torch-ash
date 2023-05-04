@@ -22,8 +22,8 @@ def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=No
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     eps = 1e-2
-    voxel_origin = [-1 + eps, -1 + eps, -1 + eps]
-    voxel_size = 2.0 * (1 - eps) / (N - 1)
+    voxel_origin = [eps,  eps, eps]
+    voxel_size = 1.0 * (1 - 2 * eps) / (N - 1)
 
     overall_index = torch.arange(0, N**3, 1, out=torch.LongTensor())
     samples = torch.zeros(N**3, 4)

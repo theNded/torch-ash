@@ -608,7 +608,7 @@ class SparseDenseGrid(ASHModule):
         grid_coords = self.grids_in_bound(grid_coords)
 
         neighbor_coord_offsets = enumerate_neighbors(
-            self.in_dim, dilation, bidirectional=False
+            self.in_dim, dilation, bidirectional=True
         ).to(self.device)
         grid_coords_with_neighbors = (
             grid_coords.view(-1, 1, 3) + neighbor_coord_offsets
