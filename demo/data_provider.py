@@ -80,12 +80,15 @@ class PointCloudDataset(torch.utils.data.Dataset):
         min_vertices = np.min(self.positions, axis=0)
         max_vertices = np.max(self.positions, axis=0)
 
+        # First roughly move to [-1, 1] box
         self.center = (min_vertices + max_vertices) / 2.0
         self.scale = 2.0 / (np.max(max_vertices - min_vertices) * 1.1)
 
         # Normalize the point cloud into [-1, 1] box
         if normalize_scene:
+            # Then convert to [0, 1] box
             self.positions = (self.positions - self.center) * self.scale
+            self.positions = 0.5 * self.positions + 0.5
 
         # For visualization
         self.pcd = o3d.t.geometry.PointCloud(self.positions)
