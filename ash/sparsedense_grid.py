@@ -246,6 +246,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_dim,
             interpolation,
         )
+
         return grad_embeddings, grad_offsets
 
     @staticmethod
@@ -309,6 +310,7 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             ctx.grid_dim,
             ctx.interpolation,
         )
+
         return (
             grad_z,
             grad_embeddings,
