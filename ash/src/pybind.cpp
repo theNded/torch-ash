@@ -2,6 +2,7 @@
 #include <torch/extension.h>
 
 #include "hashmap.h"
+#include "sampler.h"
 #include "sparsedense_grid.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -29,4 +30,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("isosurface_extraction", &isosurface_extraction,
           "Isosurface extraction");
     m.def("marching_cubes", &marching_cubes, "Marching cubes");
+
+    m.def("ray_sample", &ray_sample, "Ray sample");
 }

@@ -12,7 +12,8 @@ struct HeapContext {
 };
 
 // External to avoid constructor on kernel
-HeapContext construct_heap_ctx(at::Tensor& heap_counter, at::Tensor& heap) {
+inline HeapContext construct_heap_ctx(at::Tensor& heap_counter,
+                                      at::Tensor& heap) {
     HeapContext ctx;
     ctx.heap_counter = heap_counter.data_ptr<int>();
     ctx.heap = heap.data_ptr<int>();
@@ -30,6 +31,12 @@ struct ValueContext {
     Blob** value_ptrs;           // [N]
     Blob** external_value_ptrs;  // [N]
 };
+
+template <typename Blob>
+void destruct_value_ctx(ValueContext<Blob> ctx) {
+    C10_CUDA_CHECK(cudaFree(ctx.value_ptrs));
+    C10_CUDA_CHECK(cudaFree(ctx.external_value_ptrs));
+}
 
 template <typename Blob>
 ValueContext<Blob> construct_value_ctx(
@@ -68,14 +75,8 @@ ValueContext<Blob> construct_value_ctx(
     return ctx;
 }
 
-template <typename Blob>
-void destruct_value_ctx(ValueContext<Blob> ctx) {
-    C10_CUDA_CHECK(cudaFree(ctx.value_ptrs));
-    C10_CUDA_CHECK(cudaFree(ctx.external_value_ptrs));
-}
-
 // Compute the max data blob size for fast copying/dispatching.
-std::pair<int64_t, std::vector<int64_t>> get_max_blob_size(
+inline std::pair<int64_t, std::vector<int64_t>> get_max_blob_size(
         const std::unordered_map<std::string, at::Tensor>& values,
         const std::unordered_map<std::string, at::Tensor>& external_values) {
     std::vector<int64_t> value_item_sizes;

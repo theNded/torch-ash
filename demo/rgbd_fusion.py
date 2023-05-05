@@ -233,6 +233,15 @@ if __name__ == "__main__":
 
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
+    fuser.grid.ray_sample(
+        rays_o=torch.zeros((1, 3)),
+        rays_d=torch.zeros((1, 3)),
+        bbox_min=torch.zeros((3,)),
+        bbox_max=torch.ones((3,)),
+        t_min=0.1,
+        t_max=4.0,
+        t_step=0.01,
+    )
 
     # sdf_fn and weight_fn
     def color_fn(x):
