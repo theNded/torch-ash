@@ -227,26 +227,54 @@ if __name__ == "__main__":
         depth_type=args.depth_type,
         depth_max=args.depth_max,
         normalize_scene=args.normalize_scene,
-        image_only=True,
+        image_only=False,
     )
     fuser = TSDFFusion(args.voxel_size, args.normalize_scene)
-
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
-    fuser.grid.ray_sample(
-        rays_o=torch.zeros((1, 3)),
-        rays_d=torch.zeros((1, 3)),
-        bbox_min=torch.zeros((3,)),
-        bbox_max=torch.ones((3,)),
-        t_min=0.1,
-        t_max=4.0,
-        t_step=0.01,
+
+    dataloader = Dataloader(
+        dataset, batch_size=100, shuffle=True, device=torch.device("cuda:0")
     )
+    datum = next(iter(dataloader))
+
+    rays_o = datum["rays_o"]
+    rays_d = datum["rays_d"]
+    ray_indices, t_nears, t_fars, prefix_sum_ray_samples = fuser.grid.ray_sample(
+        rays_o=rays_o,
+        rays_d=rays_d,
+        t_min=0.1,
+        t_max=1.4,
+        t_step=0.02,
+    )
+    lineset = o3d.t.geometry.LineSet()
+    positions = torch.cat([rays_o + 0.1 * rays_d, rays_o + 1.4 * rays_d], dim=0)
+    indices = torch.cat(
+        [
+            torch.arange(len(rays_o)).view(-1, 1),
+            torch.arange(len(rays_o), 2 * len(rays_o)).view(-1, 1),
+        ],
+        dim=-1,
+    )
+    print(positions)
+    print(indices)
+    lineset.point.positions = positions.cpu().numpy()
+    lineset.line.indices = indices.cpu().numpy().astype(np.int32)
+
+    sample_positions = (
+        rays_o[ray_indices] + 0.5 * (t_nears + t_fars).view(-1, 1) * rays_d[ray_indices]
+    )
+    sample_pcd = o3d.t.geometry.PointCloud(sample_positions.cpu().numpy())
+    o3d.visualization.draw([sample_pcd])
 
     # sdf_fn and weight_fn
     def color_fn(x):
         embeddings, masks = fuser.grid(x, interpolation="linear")
         return embeddings[..., 1:4].contiguous()
+
+    def weight_fn(x):
+        embeddings, masks = fuser.grid(x, interpolation="linear")
+        return embeddings[..., 4:5].contiguous()
 
     def grad_fn(x):
         x.requires_grad_(True)
@@ -263,6 +291,19 @@ if __name__ == "__main__":
     def normal_fn(x):
         return F.normalize(grad_fn(x), dim=-1).contiguous()
 
+    sample_weights = weight_fn(sample_positions)
+    print(sample_weights)
+    mask = (sample_weights >= 2.0).squeeze()
+
+    print(ray_indices[mask])
+
+    sample_colors = color_fn(sample_positions)
+    sample_normals = normal_fn(sample_positions)
+
+    sample_pcd.point.positions = sample_positions[mask].detach().cpu().numpy()
+    sample_pcd.point.colors = sample_colors[mask].detach().cpu().numpy()
+    sample_pcd.point.normals = sample_normals[mask].detach().cpu().numpy()
+
     sdf = fuser.grid.embeddings[..., 0].contiguous()
     weight = fuser.grid.embeddings[..., 4].contiguous()
     mesh = fuser.grid.marching_cubes(
@@ -274,7 +315,7 @@ if __name__ == "__main__":
         iso_value=0.0,
         weight_thr=0.5,
     )
-    o3d.visualization.draw(mesh)
+    o3d.visualization.draw([mesh, lineset, sample_pcd])
     print(f"sparse grid size before pruning: {fuser.grid.engine.size()}")
     fuser.prune_(0.5)
     print(f"sparse grid size after pruning: {fuser.grid.engine.size()}")

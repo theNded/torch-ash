@@ -4,23 +4,102 @@
 #include "minivec.h"
 #include "sampler.h"
 
-__global__ void ray_sample_kernel(stdgpu::unordered_map<MiniVec<int, 3>,
-                                                        int,
-                                                        MiniVecHash<int, 3>,
-                                                        MiniVecEq<int, 3>> map,
-                                  const MiniVec<float, 3>* ray_origins,
-                                  const MiniVec<float, 3>* ray_directions,
-                                  const MiniVec<float, 3>* bbox_min,
-                                  const MiniVec<float, 3>* bbox_max,
-                                  int* sample_count,
-                                  int64_t* ray_indices,
-                                  float* t_nears,
-                                  float* t_fars,
-                                  int64_t* prefix_sum_ray_indices,
-                                  const float t_min,
-                                  const float t_max,
-                                  const float t_step,
-                                  const float empty_space_step_multiplier) {}
+__global__ void ray_sample_count_kernel(
+        stdgpu::unordered_map<MiniVec<int, 3>,
+                              int,
+                              MiniVecHash<int, 3>,
+                              MiniVecEq<int, 3>> map,
+        const MiniVec<float, 3>* ray_origins,
+        const MiniVec<float, 3>* ray_directions,
+        const MiniVec<float, 3>* bbox_min,
+        const MiniVec<float, 3>* bbox_max,
+        int64_t* ray_sample_counts,  // temporary
+        int64_t* ray_indices,
+        float* t_nears,
+        float* t_fars,
+        const int64_t* prefix_sum_ray_sample_counts,
+        const float t_min,
+        const float t_max,
+        const float t_step,
+        const float grid2cell_multiplier,
+        const int len) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= len) {
+        return;
+    }
+
+    auto xyz_min = bbox_min[0];
+    auto xyz_max = bbox_max[0];
+
+    auto ray_o = ray_origins[idx];
+    auto ray_d = ray_directions[idx];
+
+    const float cell2grid_multiplier = 1.0 / grid2cell_multiplier;
+
+    const float t_cell_step = t_step;
+    const float t_grid_step = t_step * grid2cell_multiplier;
+
+    float t = t_min;
+    float t_near = t_min;
+    int local_count = 0;
+
+    bool allocation_pass = (ray_sample_counts != nullptr);
+    bool assignment_pass = (ray_indices != nullptr) && (t_nears != nullptr) &&
+                           (t_fars != nullptr) &&
+                           (prefix_sum_ray_sample_counts != nullptr);
+    if (!allocation_pass && !assignment_pass) return;
+    if (allocation_pass && assignment_pass) {
+        printf("Cannot run allocation and assignment in the same pass, "
+               "abort!\n");
+        return;
+    }
+
+    int start = -1, end = -1;
+    if (assignment_pass) {
+        start = (idx == 0) ? 0 : prefix_sum_ray_sample_counts[idx - 1];
+        end = prefix_sum_ray_sample_counts[idx];
+    }
+
+    while (t < t_max) {
+        auto xyz_cell = ray_o + t * ray_d;
+
+        // Bound check
+        bool in_bound = true;
+        for (int d = 0; d < 3; ++d) {
+            in_bound = in_bound &&
+                       (xyz_cell[d] >= xyz_min[d] && xyz_cell[d] <= xyz_max[d]);
+        }
+        if (!in_bound) break;
+
+        // Empty check
+        auto xyz_grid = floor((xyz_cell * cell2grid_multiplier)).cast<int>();
+        auto it = map.find(xyz_grid);
+        if (it == map.end()) {
+            t += t_grid_step;
+        } else {
+            t += t_cell_step;
+            if (assignment_pass) {
+                ray_indices[start + local_count] = idx;
+                t_nears[start + local_count] = t_near;
+                t_fars[start + local_count] = t;
+            }
+            t_near = t;
+
+            local_count++;
+        }
+    }
+    if (allocation_pass) {
+        ray_sample_counts[idx] = local_count;
+    }
+
+    if (assignment_pass) {
+        if (end != start + local_count) {
+            printf("[thread %d]Inconsistent sample counts between allocation "
+                   "and assignment. Should never reach here!\n",
+                   idx);
+        }
+    }
+}
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
         const HashMap& hashmap,
@@ -31,7 +110,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
         const float t_min,
         const float t_max,
         const float t_step,
-        const float empty_space_step_multiplier) {
+        const float grid2cell_multiplier) {
     // Ray sample is for 3D hash map only
 
     using key_t = MiniVec<int, 3>;
@@ -61,43 +140,43 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
     auto int64_options = at::TensorOptions()
                                  .dtype(torch::kInt64)
                                  .device(ray_origins.device());
-
-    at::Tensor sample_counter = at::zeros({}, int32_options);
-    at::Tensor prefix_sum_ray_indices = at::zeros({len}, int64_options);
-    ray_sample_kernel<<<block_size, grid_size>>>(
-            map, static_cast<MiniVec<float, 3>*>(ray_origins.data_ptr()),
-            static_cast<MiniVec<float, 3>*>(ray_directions.data_ptr()),
-            static_cast<MiniVec<float, 3>*>(bbox_min.data_ptr()),
-            static_cast<MiniVec<float, 3>*>(bbox_max.data_ptr()),
-            sample_counter.data_ptr<int>(),
-            nullptr,  // ray_indices
-            nullptr,  // t_nears
-            nullptr,  // t_fars
-            prefix_sum_ray_indices.data_ptr<int64_t>(), t_min, t_max, t_step,
-            empty_space_step_multiplier);
-
-    int sample_count = sample_counter.item<int>();
     auto float_options = at::TensorOptions()
                                  .dtype(torch::kFloat32)
                                  .device(ray_origins.device());
-    at::Tensor ray_indices = at::zeros({sample_count}, int64_options);
-    at::Tensor t_nears = at::zeros({sample_count}, float_options);
-    at::Tensor t_fars = at::zeros({sample_count}, float_options);
 
-    sample_counter.zero_();
-
-    ray_sample_kernel<<<block_size, grid_size>>>(
+    at::Tensor ray_sample_counts = at::zeros({len}, int64_options);
+    ray_sample_count_kernel<<<block_size, grid_size>>>(
             map, static_cast<MiniVec<float, 3>*>(ray_origins.data_ptr()),
             static_cast<MiniVec<float, 3>*>(ray_directions.data_ptr()),
             static_cast<MiniVec<float, 3>*>(bbox_min.data_ptr()),
             static_cast<MiniVec<float, 3>*>(bbox_max.data_ptr()),
-            sample_counter.data_ptr<int>(),
-            ray_indices.data_ptr<int64_t>(),  // ray_indices
-            t_nears.data_ptr<float>(),        // t_nears
-            t_fars.data_ptr<float>(),         // t_fars
-            prefix_sum_ray_indices.data_ptr<int64_t>(), t_min, t_max, t_step,
-            empty_space_step_multiplier);
+            ray_sample_counts.data_ptr<int64_t>(), nullptr, nullptr, nullptr,
+            nullptr, t_min, t_max, t_step, grid2cell_multiplier, len);
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::cout << ray_sample_counts << "\n";
+    at::Tensor prefix_sum_ray_sample_counts = at::cumsum(ray_sample_counts, 0);
+    std::cout << prefix_sum_ray_sample_counts << "\n";
+
+    int64_t total_count =
+            prefix_sum_ray_sample_counts.index({-1}).item<int64_t>();
+    std::cout << "total samples: " << total_count;
+
+    at::Tensor ray_indices = at::zeros({total_count}, int64_options);
+    at::Tensor t_nears = at::zeros({total_count}, float_options);
+    at::Tensor t_fars = at::zeros({total_count}, float_options);
+
+    ray_sample_count_kernel<<<block_size, grid_size>>>(
+            map, static_cast<MiniVec<float, 3>*>(ray_origins.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(ray_directions.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(bbox_min.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(bbox_max.data_ptr()), nullptr,
+            ray_indices.data_ptr<int64_t>(), t_nears.data_ptr<float>(),
+            t_fars.data_ptr<float>(),
+            prefix_sum_ray_sample_counts.data_ptr<int64_t>(), t_min, t_max,
+            t_step, grid2cell_multiplier, len);
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
 
     return std::make_tuple(ray_indices, t_nears, t_fars,
-                           prefix_sum_ray_indices);
+                           prefix_sum_ray_sample_counts);
 }

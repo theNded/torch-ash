@@ -664,7 +664,7 @@ class SparseDenseGrid(ASHModule):
         bbox_max: torch.Tensor,
         t_min: float,
         t_max: float,
-        t_step: float,
+        t_step: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample the sparse-dense grid along rays.
         Args:
@@ -693,6 +693,15 @@ class SparseDenseGrid(ASHModule):
 
         Note in this setup, everything is using the unit of 1 cell size.
         """
+        print(f"rays_o: {rays_o}")
+        print(f"rays_d: {rays_d}")
+        print(f"bbox_min: {bbox_min}")
+        print(f"bbox_Max: {bbox_max}")
+
+        print(f"t_min: {t_min}")
+        print(f"t_max: {t_max}")
+        print(f"t_step: {t_step}")
+
         ray_indices, t_near, t_far, ray_prefix_sum = backend.ray_sample(
             self.engine.backend,
             rays_o,
@@ -933,3 +942,37 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         )
 
         self.engine.insert_keys(grid_coords)
+
+    @torch.no_grad()
+    def ray_sample(
+        self,
+        rays_o: torch.Tensor,
+        rays_d: torch.Tensor,
+        t_min: float = None,
+        t_max: float = None,
+        t_step: float = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        factor = self.cell_size.min().item()
+        if t_min is None:
+            t_min = 0.01
+        if t_max is None:
+            t_max = np.sqrt(3)
+        if t_step is None:
+            t_step = factor
+
+        ray_indices, t_nears, t_fars, prefix_sum_ray_sample_counts = super().ray_sample(
+            rays_o=self.transform_world_to_cell(rays_o),
+            rays_d=rays_d,
+            bbox_min=self.transform_world_to_cell(self.bbox_min),
+            bbox_max=self.transform_world_to_cell(self.bbox_max),
+            t_min=t_min / factor,
+            t_max=t_max / factor,
+            t_step=t_step / factor,
+        )
+
+        return (
+            ray_indices,
+            t_nears * factor,
+            t_fars * factor,
+            prefix_sum_ray_sample_counts,
+        )
