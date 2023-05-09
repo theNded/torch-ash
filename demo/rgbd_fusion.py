@@ -135,7 +135,7 @@ class TSDFFusion:
         return sdf, rgb, weight
 
     @torch.no_grad()
-    def prune_(self, weight_threshold=1):
+    def prune_(self, grid_mean_weight_thr=1):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
 
         batch_size = min(1000, len(grid_coords))
@@ -145,7 +145,7 @@ class TSDFFusion:
             grid_indices_batch = grid_indices[i : i + batch_size]
 
             weight = self.grid.embeddings[grid_indices_batch, cell_indices, 4]
-            mask = weight.mean(dim=1) < weight_threshold
+            mask = weight.mean(dim=1) < grid_mean_weight_thr
 
             if mask.sum() > 0:
                 self.grid.engine.erase(grid_coords_batch[mask].squeeze(1))

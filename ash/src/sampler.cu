@@ -154,13 +154,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
             nullptr, t_min, t_max, t_step, grid2cell_multiplier, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    std::cout << ray_sample_counts << "\n";
+    // std::cout << ray_sample_counts << "\n";
     at::Tensor prefix_sum_ray_sample_counts = at::cumsum(ray_sample_counts, 0);
-    std::cout << prefix_sum_ray_sample_counts << "\n";
+    // std::cout << prefix_sum_ray_sample_counts << "\n";
 
     int64_t total_count =
             prefix_sum_ray_sample_counts.index({-1}).item<int64_t>();
-    std::cout << "total samples: " << total_count;
+    // std::cout << "total samples: " << total_count;
 
     at::Tensor ray_indices = at::zeros({total_count}, int64_options);
     at::Tensor t_nears = at::zeros({total_count}, float_options);
