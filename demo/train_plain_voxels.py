@@ -18,6 +18,13 @@ from data_provider import ImageDataset, Dataloader
 from rgbd_fusion import TSDFFusion
 
 
+class PlainVoxels(nn.Module):
+    def __init__(self):
+        pass
+
+    def forward(self, x):
+        pass
+
 if __name__ == "__main__":
     import argparse
 

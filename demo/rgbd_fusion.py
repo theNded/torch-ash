@@ -35,37 +35,13 @@ class TSDFFusion:
 
     def __init__(
         self,
-        voxel_size: float = 0.02,
-        normalize_scene: bool = True,
+        grid: BoundedSparseDenseGrid,
     ):
-        if not normalize_scene:
-            self.grid = UnBoundedSparseDenseGrid(
-                in_dim=3,
-                num_embeddings=80000,  # TODO: make this configurable
-                embedding_dim=5,
-                grid_dim=8,  # TODO: make this configurable
-                cell_size=voxel_size,
-                device=self.device,
-            )
-            self.voxel_size = voxel_size
-            print(f"Use original scale scene with metric voxel size {self.voxel_size}m")
-
-        else:
-            self.grid = BoundedSparseDenseGrid(
-                in_dim=3,
-                num_embeddings=80000,
-                embedding_dim=5,
-                grid_dim=8,
-                sparse_grid_dim=32,
-                bbox_min=-1 * torch.ones(3, device=self.device),
-                bbox_max=torch.ones(3, device=self.device),
-                device=self.device,
-            )
-            self.voxel_size = self.grid.cell_size[0]
-            print(
-                f"Use normalized scene with non-metric voxel size {self.voxel_size} in bounding box"
-            )
-
+        self.grid = grid
+        self.voxel_size = self.grid.cell_size.min().item()
+        print(
+            f"Use normalized scene with non-metric voxel size {self.voxel_size} in bounding box"
+        )
         self.trunc = 5 * self.voxel_size
 
     @torch.no_grad()
@@ -218,8 +194,6 @@ if __name__ == "__main__":
     parser.add_argument("--path", type=str, required=True)
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
     parser.add_argument("--depth_max", type=float, default=4.0, help="max depth value to truncate in meters")
-    parser.add_argument("--voxel_size", type=float, default=0.02, help="voxel size in meters in the metric space")
-    parser.add_argument("--normalize_scene", action="store_true", help="Normalize scene into the [0, 1] bounding box")
     args = parser.parse_args()
     # fmt: on
 
@@ -228,10 +202,23 @@ if __name__ == "__main__":
         args.path,
         depth_type=args.depth_type,
         depth_max=args.depth_max,
-        normalize_scene=args.normalize_scene,
+        normalize_scene=True,
         image_only=False,
     )
-    fuser = TSDFFusion(args.voxel_size, args.normalize_scene)
+
+    device = torch.device('cuda:0')
+    grid = BoundedSparseDenseGrid(
+        in_dim=3,
+        num_embeddings=80000,
+        embedding_dim=5,
+        grid_dim=8,
+        sparse_grid_dim=32,
+        bbox_min=-1 * torch.ones(3, device=device),
+        bbox_max=torch.ones(3, device=device),
+        device=device,
+    )
+
+    fuser = TSDFFusion(grid)
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
 
@@ -259,8 +246,6 @@ if __name__ == "__main__":
         ],
         dim=-1,
     )
-    print(positions)
-    print(indices)
     lineset.point.positions = positions.cpu().numpy()
     lineset.line.indices = indices.cpu().numpy().astype(np.int32)
 
@@ -295,7 +280,6 @@ if __name__ == "__main__":
         return F.normalize(grad_fn(x), dim=-1).contiguous()
 
     def rgb_sigma_fn(t_nears, t_fars, ray_indices):
-        print(t_nears.shape, t_fars.shape, ray_indices.shape)
         positions = rays_o[ray_indices] + rays_d[ray_indices] * (
             0.5 * (t_nears + t_fars)
         )
@@ -309,7 +293,6 @@ if __name__ == "__main__":
         alpha = 1.0 / beta
         sigmas = (0.5 * alpha) * (1.0 + sdfs.sign() * torch.expm1(-sdfs.abs() / beta))
         sigmas = torch.where(masks, sigmas, torch.zeros_like(sigmas))
-        print(rgbs.shape, sigmas.shape)
         return rgbs, sigmas.view(-1, 1)
 
     sample_weights = weight_fn(sample_positions)
@@ -322,12 +305,6 @@ if __name__ == "__main__":
     sum_masked_ray_samples.index_add_(
         0, masked_ray_indices, torch.ones_like(masked_ray_indices)
     )
-    print(masked_ray_indices)
-    print(sum_masked_ray_samples)
-    print(torch.cumsum(sum_masked_ray_samples, dim=0))
-
-    print(ray_indices.shape, ray_indices[mask].shape)
-    print(t_nears[mask].shape, t_fars[mask].shape, ray_indices[mask].shape, len(rays_o))
     color, opacity, depth = nerfacc.rendering(
         t_nears[mask].view(-1, 1),
         t_fars[mask].view(-1, 1),
@@ -335,7 +312,6 @@ if __name__ == "__main__":
         n_rays=len(rays_o),
         rgb_sigma_fn=rgb_sigma_fn,
     )
-    print(color)
 
     lineset.line.colors = color.detach().cpu().numpy()
 
