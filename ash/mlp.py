@@ -139,3 +139,5 @@ class SirenNet(nn.Module):
                 x *= rearrange(mod, "d -> () d")
 
         return self.last_layer(x)
+
+
