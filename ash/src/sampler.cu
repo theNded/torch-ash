@@ -128,7 +128,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
 
     stdgpu::unordered_map<key_t, int, hash_t, eq_t> map =
             hashmap_impl->backend_;
-    std::cout << "stdgpu map size: " << map.size() << std::endl;
 
     int len = ray_origins.size(0);
     int block_size = 1024;
