@@ -70,10 +70,10 @@ class NeuralSDF(nn.Module):
 
             self.empty_space_encoder = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=8**3,
+                num_embeddings=4**3,
                 embedding_dim=embedding_dim,
                 grid_dim=1,
-                sparse_grid_dim=8,
+                sparse_grid_dim=4,
                 bbox_min=-0.1 * torch.ones(3, dtype=torch.float32, device=device),
                 bbox_max=1.1 * torch.ones(3, dtype=torch.float32, device=device),
                 device=device,
@@ -160,7 +160,15 @@ class NeuralSDF(nn.Module):
             sdf = self.forward_sdf(x)
             return sdf.detach()
 
-        create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
+        create_mesh(
+            sdf_fn,
+            fname,
+            bbox_min=torch.zeros(3),
+            N=256,
+            max_batch=64**3,
+            offset=None,
+            scale=None,
+        )
 
 
 if __name__ == "__main__":

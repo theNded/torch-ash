@@ -14,7 +14,18 @@ from einops import rearrange
 # TODO: replace them with versatile torch-ash MarchingCubes
 """From the DeepSDF repository https://github.com/facebookresearch/DeepSDF
 """
-def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=None):
+
+
+def create_mesh(
+    decoder,
+    filename,
+    bbox_min=-torch.ones(3),
+    bbox_max=torch.ones(3),
+    N=256,
+    max_batch=64**3,
+    offset=None,
+    scale=None,
+):
     start = time.time()
     ply_filename = filename
 
@@ -22,8 +33,9 @@ def create_mesh(decoder, filename, N=256, max_batch=64**3, offset=None, scale=No
 
     # NOTE: the voxel_origin is actually the (bottom, left, down) corner, not the middle
     eps = 1e-2
-    voxel_origin = [eps,  eps, eps]
-    voxel_size = 1.0 * (1 - 2 * eps) / (N - 1)
+    voxel_origin = bbox_min + eps
+    voxel_size = (bbox_max - bbox_min - 2 * eps) / (N - 1)
+    voxel_size = voxel_size[0]
 
     overall_index = torch.arange(0, N**3, 1, out=torch.LongTensor())
     samples = torch.zeros(N**3, 4)
@@ -146,5 +158,3 @@ def convert_sdf_samples_to_ply(
             time.time() - start_time
         )
     )
-
-

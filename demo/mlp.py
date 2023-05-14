@@ -30,6 +30,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+from mesh_util import create_mesh
+
 
 def get_activation(name):
     if name is None:
@@ -73,6 +75,7 @@ class MLP(nn.Module):
         num_layers,
         radius=1.0,
         sphere_init=True,
+        inside_out=False,
         weight_norm=True,
         final_activation=None,
     ):
@@ -81,6 +84,7 @@ class MLP(nn.Module):
         self.dim_hidden = dim_hidden
         self.weight_norm = weight_norm
 
+        self.inside_out = inside_out
         self.sphere_init = sphere_init
         self.sphere_init_radius = radius
 
@@ -113,10 +117,11 @@ class MLP(nn.Module):
         layer = nn.Linear(dim_in, dim_out, bias=True)
         if self.sphere_init:
             if is_last:
-                torch.nn.init.constant_(layer.bias, -self.sphere_init_radius)
+                sign = -1.0 if self.inside_out else 1.0
+                torch.nn.init.constant_(layer.bias, -sign * self.sphere_init_radius)
                 torch.nn.init.normal_(
                     layer.weight,
-                    mean=np.sqrt(np.pi) / np.sqrt(dim_in),
+                    mean=sign * np.sqrt(np.pi) / np.sqrt(dim_in),
                     std=0.0001,
                 )
             elif is_first:
@@ -144,7 +149,9 @@ class MLP(nn.Module):
 
 
 if __name__ == "__main__":
-    implicit_mlp = MLP(3 + 16, 128, 1 + 13, 3, sphere_init=True, weight_norm=True)
+    implicit_mlp = MLP(
+        3 + 16, 128, 1 + 13, 3, radius=0.8, sphere_init=True, weight_norm=True
+    ).cuda()
     rgb_mlp = MLP(
         3 + 13,
         128,
@@ -153,14 +160,20 @@ if __name__ == "__main__":
         sphere_init=False,
         weight_norm=False,
         final_activation="sigmoid",
-    )
+    ).cuda()
 
-    x = torch.rand(100, 3)
-    d = torch.rand(100, 3)
-    pos_feat = torch.rand(100, 16)
+    x = torch.rand(100, 3).cuda()
+    d = torch.rand(100, 3).cuda()
+    pos_feat = torch.rand(100, 16).cuda()
 
     out = implicit_mlp(torch.cat([x, pos_feat], dim=-1))
     sdf, geo_feat = torch.split(out, [1, 13], dim=-1)
     rgb = rgb_mlp(torch.cat([d, geo_feat], dim=-1))
 
-    print(rgb.shape)
+    def sdf_fn(x):
+        pos_feat = torch.rand((x.shape[0], 16)).cuda()
+        out = implicit_mlp(torch.cat([x, pos_feat], dim=-1))
+        sdf = out[:, 0]
+        return sdf.detach()
+
+    create_mesh(sdf_fn, "test.ply")
