@@ -1,147 +1,166 @@
+"""
+MIT License
+
+Copyright (c) 2022 Yuanchen Guo
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Modified from
+https://github.com/bennyguo/instant-nsr-pl/blob/main/models/network_utils.py
+"""
+
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
 
-class ImplicitNetworkGrid(nn.Module):
+def get_activation(name):
+    if name is None:
+        return lambda x: x
+    name = name.lower()
+    if name == "none":
+        return lambda x: x
+    elif name.startswith("scale"):
+        scale_factor = float(name[5:])
+        return lambda x: x.clamp(0.0, scale_factor) / scale_factor
+    elif name.startswith("clamp"):
+        clamp_max = float(name[5:])
+        return lambda x: x.clamp(0.0, clamp_max)
+    elif name.startswith("mul"):
+        mul_factor = float(name[3:])
+        return lambda x: x * mul_factor
+    elif name == "lin2srgb":
+        return lambda x: torch.where(
+            x > 0.0031308,
+            torch.pow(torch.clamp(x, min=0.0031308), 1.0 / 2.4) * 1.055 - 0.055,
+            12.92 * x,
+        ).clamp(0.0, 1.0)
+    elif name == "trunc_exp":
+        return trunc_exp
+    elif name.startswith("+") or name.startswith("-"):
+        return lambda x: x + float(name)
+    elif name == "sigmoid":
+        return lambda x: torch.sigmoid(x)
+    elif name == "tanh":
+        return lambda x: torch.tanh(x)
+    else:
+        return getattr(F, name)
+
+
+class MLP(nn.Module):
     def __init__(
         self,
-        feature_vector_size,
-        sdf_bounding_sphere,
-        d_in,
-        d_out,
-        dims,
-        geometric_init=True,
-        bias=1.0,
-        skip_in=(),
+        dim_in,
+        dim_hidden,
+        dim_out,
+        num_layers,
+        radius=1.0,
+        sphere_init=True,
         weight_norm=True,
-        multires=0,
-        sphere_scale=1.0,
-        inside_outside=False,
-        base_size=16,
-        end_size=2048,
-        logmap=19,
-        num_levels=16,
-        level_dim=2,
-        divide_factor=1.5,  # used to normalize the points range for multi-res grid
-        use_grid_feature=True,
+        final_activation=None,
     ):
         super().__init__()
 
-        self.sdf_bounding_sphere = sdf_bounding_sphere
-        self.sphere_scale = sphere_scale
-        dims = [d_in] + dims + [d_out + feature_vector_size]
-        self.embed_fn = None
-        self.divide_factor = divide_factor
-        self.grid_feature_dim = num_levels * level_dim
-        self.use_grid_feature = use_grid_feature
-        dims[0] += self.grid_feature_dim
+        self.dim_hidden = dim_hidden
+        self.weight_norm = weight_norm
 
-        print(
-            f"using hash encoder with {num_levels} levels, each level with feature dim {level_dim}"
-        )
-        print(f"resolution:{base_size} -> {end_size} with hash map size {logmap}")
+        self.sphere_init = sphere_init
+        self.sphere_init_radius = radius
 
-        # can also use tcnn for multi-res grid as it now supports eikonal loss
-        base_size = 16
-        self.encoding = tcnn.Encoding(
-            3,
-            {
-                "otype": "HashGrid",
-                "n_levels": 16,
-                "n_features_per_level": 2,
-                "log2_hashmap_size": 19,
-                "base_resolution": base_size,
-                "per_level_scale": 1.34,
-                "interpolation": "Smoothstep",
-            },
-        )
+        self.num_hidden_layers = num_layers - 1
+        assert self.num_hidden_layers > 0, "Number of layers must be at least 2"
 
-        if multires > 0:
-            embed_fn, input_ch = get_embedder(multires, input_dims=d_in)
-            self.embed_fn = embed_fn
-            dims[0] += input_ch - 3
-        print("network architecture")
-        print(dims)
+        self.layers = [
+            self.make_linear(dim_in, self.dim_hidden, is_first=True, is_last=False),
+            self.make_activation(),
+        ]
+        for i in range(self.num_hidden_layers - 1):
+            self.layers += [
+                self.make_linear(
+                    self.dim_hidden, self.dim_hidden, is_first=False, is_last=False
+                ),
+                self.make_activation(),
+            ]
+        self.layers += [
+            self.make_linear(self.dim_hidden, dim_out, is_first=False, is_last=True)
+        ]
+        self.layers = nn.Sequential(*self.layers)
+        self.output_activation = get_activation(final_activation)
 
-        self.num_layers = len(dims)
-        self.skip_in = skip_in
-
-        for l in range(0, self.num_layers - 1):
-            if l + 1 in self.skip_in:
-                out_dim = dims[l + 1] - dims[0]
-            else:
-                out_dim = dims[l + 1]
-
-            lin = nn.Linear(dims[l], out_dim)
-
-            if geometric_init:
-                if l == self.num_layers - 2:
-                    if not inside_outside:
-                        torch.nn.init.normal_(
-                            lin.weight,
-                            mean=np.sqrt(np.pi) / np.sqrt(dims[l]),
-                            std=0.0001,
-                        )
-                        torch.nn.init.constant_(lin.bias, -bias)
-                    else:
-                        torch.nn.init.normal_(
-                            lin.weight,
-                            mean=-np.sqrt(np.pi) / np.sqrt(dims[l]),
-                            std=0.0001,
-                        )
-                        torch.nn.init.constant_(lin.bias, bias)
-
-                elif multires > 0 and l == 0:
-                    torch.nn.init.constant_(lin.bias, 0.0)
-                    torch.nn.init.constant_(lin.weight[:, 3:], 0.0)
-                    torch.nn.init.normal_(
-                        lin.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(out_dim)
-                    )
-                elif multires > 0 and l in self.skip_in:
-                    torch.nn.init.constant_(lin.bias, 0.0)
-                    torch.nn.init.normal_(
-                        lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim)
-                    )
-                    torch.nn.init.constant_(lin.weight[:, -(dims[0] - 3) :], 0.0)
-                else:
-                    torch.nn.init.constant_(lin.bias, 0.0)
-                    torch.nn.init.normal_(
-                        lin.weight, 0.0, np.sqrt(2) / np.sqrt(out_dim)
-                    )
-
-            if weight_norm:
-                lin = nn.utils.weight_norm(lin)
-
-            setattr(self, "lin" + str(l), lin)
-
-        self.softplus = nn.Softplus(beta=100)
-        self.cache_sdf = None
-
-    def forward(self, input):
-        if self.use_grid_feature:
-            # normalize point range as encoding assume points are in [-1, 1]
-            feature = self.encoding(input / self.divide_factor)
-        else:
-            feature = torch.zeros_like(input[:, :1].repeat(1, self.grid_feature_dim))
-
-        if self.embed_fn is not None:
-            embed = self.embed_fn(input)
-            input = torch.cat((embed, feature), dim=-1)
-        else:
-            input = torch.cat((input, feature), dim=-1)
-
-        x = input
-
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
-
-            if l in self.skip_in:
-                x = torch.cat([x, input], 1) / np.sqrt(2)
-
-            x = lin(x)
-
-            if l < self.num_layers - 2:
-                x = self.softplus(x)
-
+    def forward(self, x):
+        x = self.layers(x.float())
+        x = self.output_activation(x)
         return x
+
+    def make_linear(self, dim_in, dim_out, is_first, is_last):
+        layer = nn.Linear(dim_in, dim_out, bias=True)
+        if self.sphere_init:
+            if is_last:
+                torch.nn.init.constant_(layer.bias, -self.sphere_init_radius)
+                torch.nn.init.normal_(
+                    layer.weight,
+                    mean=np.sqrt(np.pi) / np.sqrt(dim_in),
+                    std=0.0001,
+                )
+            elif is_first:
+                torch.nn.init.constant_(layer.bias, 0.0)
+                torch.nn.init.constant_(layer.weight[:, 3:], 0.0)
+                torch.nn.init.normal_(
+                    layer.weight[:, :3], 0.0, np.sqrt(2) / np.sqrt(dim_out)
+                )
+            else:
+                torch.nn.init.constant_(layer.bias, 0.0)
+                torch.nn.init.normal_(layer.weight, 0.0, np.sqrt(2) / np.sqrt(dim_out))
+        else:
+            torch.nn.init.constant_(layer.bias, 0.0)
+            torch.nn.init.kaiming_uniform_(layer.weight, nonlinearity="relu")
+
+        if self.weight_norm:
+            layer = nn.utils.weight_norm(layer)
+        return layer
+
+    def make_activation(self):
+        if self.sphere_init:
+            return nn.Softplus(beta=100)
+        else:
+            return nn.ReLU(inplace=True)
+
+
+if __name__ == "__main__":
+    implicit_mlp = MLP(3 + 16, 128, 1 + 13, 3, sphere_init=True, weight_norm=True)
+    rgb_mlp = MLP(
+        3 + 13,
+        128,
+        3,
+        3,
+        sphere_init=False,
+        weight_norm=False,
+        final_activation="sigmoid",
+    )
+
+    x = torch.rand(100, 3)
+    d = torch.rand(100, 3)
+    pos_feat = torch.rand(100, 16)
+
+    out = implicit_mlp(torch.cat([x, pos_feat], dim=-1))
+    sdf, geo_feat = torch.split(out, [1, 13], dim=-1)
+    rgb = rgb_mlp(torch.cat([d, geo_feat], dim=-1))
+
+    print(rgb.shape)
