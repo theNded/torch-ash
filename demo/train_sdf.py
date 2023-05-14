@@ -215,7 +215,7 @@ if __name__ == "__main__":
                     for name, param in model.named_parameters()
                     if "empty_space_encoder" in name
                 ],
-                "lr": 1e-4,
+                "lr": 1e-3,
             },
             {
                 "params": [

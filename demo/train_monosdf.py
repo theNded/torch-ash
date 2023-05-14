@@ -19,6 +19,7 @@ from data_provider import ImageDataset, Dataloader
 
 from rgbd_fusion import TSDFFusion
 from depth_loss import ScaleAndShiftInvariantLoss
+from mesh_util import create_mesh
 
 
 class SDFToSigma(nn.Module):
@@ -40,11 +41,11 @@ class MonoSDF(nn.Module):
 
         self.device = device
         self.grid_dim = 4
-        self.sparse_grid_dim = 16
+        self.sparse_grid_dim = 32
 
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=10000,
+            num_embeddings=self.sparse_grid_dim**3,
             embedding_dim=8,
             grid_dim=self.grid_dim,
             sparse_grid_dim=self.sparse_grid_dim,
@@ -77,7 +78,7 @@ class MonoSDF(nn.Module):
     def fuse_dataset(self, dataset):
         self.tsdf_grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=10000,
+            num_embeddings=60000,
             embedding_dim=5,
             grid_dim=self.grid_dim,
             sparse_grid_dim=self.sparse_grid_dim,
@@ -88,10 +89,12 @@ class MonoSDF(nn.Module):
 
         fuser = TSDFFusion(self.tsdf_grid)
         fuser.fuse_dataset(dataset)
-        fuser.prune_(0.5)
+        print(f"hash map size before pruning: {self.tsdf_grid.engine.size()}")
+        fuser.prune_(3)
         print(f"hash map size after pruning: {self.tsdf_grid.engine.size()}")
 
         self.grid.engine.insert_keys(self.tsdf_grid.engine.keys())
+        # self.grid.dense_init_()
 
     def forward(self, rays_o, rays_d, rays_d_norm, near, far):
         (
@@ -99,7 +102,7 @@ class MonoSDF(nn.Module):
             t_nears,
             t_fars,
             prefix_sum_ray_samples,
-        ) = self.grid.ray_sample(
+        ) = self.tsdf_grid.ray_sample(
             rays_o=rays_o,
             rays_d=rays_d,
             t_min=near,
@@ -191,43 +194,45 @@ class MonoSDF(nn.Module):
             "sdf_grads": sdf_grads,
         }
 
-    def marching_cubes(self):
-        sdf = self.tsdf_grid.embeddings[..., 0].contiguous()
+    @torch.no_grad()
+    def visualize_occupied_cells(self):
+        grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
+        cell_positions = self.grid.cell_to_world(grid_coords, cell_coords)
+        pcd = o3d.t.geometry.PointCloud(cell_positions.cpu().numpy())
+        pcd.paint_uniform_color([0.0, 0.0, 1.0])
+        return pcd
 
+    def marching_cubes(self):
+        # grid_coords, cell_coords, _, _ = self.tsdf_grid.items()
+        # cell_positions = self.tsdf_grid.cell_to_world(grid_coords, cell_coords)
+        # sdf = self.sdf_fn(cell_positions).detach().contiguous()
+        sdf = self.tsdf_grid.embeddings[..., 0].contiguous()
         weight = self.tsdf_grid.embeddings[..., 4].contiguous()
+        # print(sdf.shape, weight.shape)
         mesh = self.tsdf_grid.marching_cubes(
             sdf,
             weight,
             vertices_only=False,
-            color_fn=self.color_fn,
-            normal_fn=self.normal_fn,
+            color_fn=None,
+            normal_fn=None,
             iso_value=0.0,
             weight_thr=0.5,
         )
         return mesh
 
-    def color_fn(self, x):
-        embeddings, masks = self.grid(x, interpolation="linear")
-        return embeddings[..., 1:4].contiguous()
-
-    def weight_fn(self, x):
-        embeddings, masks = self.grid(x, interpolation="linear")
-        return embeddings[..., 4:5].contiguous()
-
-    def grad_fn(self, x):
-        x.requires_grad_(True)
+    def sdf_fn(self, x):
         embeddings, masks = self.grid(x, interpolation="linear")
 
-        grad_x = torch.autograd.grad(
-            outputs=embeddings[..., 0],
-            inputs=x,
-            grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
-            create_graph=True,
-        )[0]
-        return grad_x
+        # Use zeros for empty space
+        # TODO: empty space grid
+        embeddings = torch.where(
+            masks.view(-1, 1), embeddings, torch.zeros_like(embeddings)
+        )
 
-    def normal_fn(self, x):
-        return F.normalize(self.grad_fn(x), dim=-1).contiguous()
+        geometry_output = self.geometry_mlp(torch.cat([x, embeddings], dim=-1))
+        sdfs, geom_embeddings = torch.split(geometry_output, [1, 13], dim=-1)
+
+        return sdfs
 
 
 if __name__ == "__main__":
@@ -253,7 +258,9 @@ if __name__ == "__main__":
     model = MonoSDF(device=torch.device("cuda:0"))
     model.fuse_dataset(dataset)
     mesh = model.marching_cubes()
-    o3d.visualization.draw([mesh])
+    mesh.compute_vertex_normals()
+    pcd = model.visualize_occupied_cells()
+    o3d.visualization.draw([pcd, mesh])
 
     batch_size = 2048
     pixel_count = dataset.H * dataset.W
@@ -269,6 +276,7 @@ if __name__ == "__main__":
     )
 
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
@@ -310,8 +318,7 @@ if __name__ == "__main__":
         optim.step()
 
         if step % 1000 == 0 and step > 0:
-            # mesh = model.marching_cubes()
-            # o3d.visualization.draw([mesh])
+            create_mesh(model.sdf_fn, f"mesh_{step:03d}.ply")
 
             # Evaluation
             for i in range(dataset.num_images):
@@ -352,5 +359,6 @@ if __name__ == "__main__":
                 axes[0, 1].imshow(im_weights)
                 axes[1, 0].imshow(im_depths)
                 axes[1, 1].imshow(im_normals)
-                plt.show()
+                plt.savefig(f"eval_{step:03d}.png")
+                plt.close(fig)
                 break
