@@ -15,6 +15,6 @@ from .multires_grid import BoundedMultiResGrid, UnBoundedMultiResGrid
 
 from .marching_cubes import marching_cubes
 
-from .mlp import SirenLayer, SirenNet
+from .mlp import SirenLayer, SirenNet, MLP
 
 from .positional_encoding import get_positional_encoder

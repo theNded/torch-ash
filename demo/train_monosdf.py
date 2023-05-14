@@ -14,7 +14,7 @@ from tqdm import tqdm
 import open3d as o3d
 import open3d.core as o3c
 
-from ash import UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict
+from ash import UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict, MLP
 from data_provider import ImageDataset, Dataloader
 
 from rgbd_fusion import TSDFFusion
@@ -38,19 +38,39 @@ class MonoSDF(nn.Module):
     def __init__(self, device):
         super().__init__()
 
+        self.device = device
+        self.grid_dim = 4
+        self.sparse_grid_dim = 16
+
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
             num_embeddings=10000,
             embedding_dim=8,
-            grid_dim=8,
-            sparse_grid_dim=32,
+            grid_dim=self.grid_dim,
+            sparse_grid_dim=self.sparse_grid_dim,
             bbox_min=-1 * torch.ones(3, device=device),
             bbox_max=torch.ones(3, device=device),
             device=device,
         )
+        nn.init.uniform_(self.grid.embeddings, -1e-4, 1e-4)
 
-        self.geometry_mlp = MLP()
-        self.color_mlp = MLP()
+        self.geometry_mlp = MLP(
+            dim_in=3 + 8,
+            dim_hidden=256,
+            dim_out=1 + 13,
+            num_layers=3,
+            radius=0.8,
+            sphere_init=True,
+            inside_out=True,
+        ).to(device)
+
+        self.color_mlp = MLP(
+            dim_in=3 + 13 + 3,
+            dim_hidden=256,
+            dim_out=3,
+            num_layers=3,
+            final_activation="sigmoid",
+        ).to(device)
 
         self.sdf_to_sigma = SDFToSigma(beta=0.01, device=device)
 
@@ -59,19 +79,19 @@ class MonoSDF(nn.Module):
             in_dim=3,
             num_embeddings=10000,
             embedding_dim=5,
-            grid_dim=8,
-            sparse_grid_dim=32,
-            bbox_min=-1 * torch.ones(3, device=device),
-            bbox_max=torch.ones(3, device=device),
-            device=device,
+            grid_dim=self.grid_dim,
+            sparse_grid_dim=self.sparse_grid_dim,
+            bbox_min=-1 * torch.ones(3, device=self.device),
+            bbox_max=torch.ones(3, device=self.device),
+            device=self.device,
         )
 
-        fuser = TSDFFusion(tsdf_grid)
+        fuser = TSDFFusion(self.tsdf_grid)
         fuser.fuse_dataset(dataset)
         fuser.prune_(0.5)
         print(f"hash map size after pruning: {self.tsdf_grid.engine.size()}")
 
-        self.feature_grid.engine.insert_keys(self.tsdf_grid.engine.keys())
+        self.grid.engine.insert_keys(self.tsdf_grid.engine.keys())
 
     def forward(self, rays_o, rays_d, rays_d_norm, near, far):
         (
@@ -89,19 +109,20 @@ class MonoSDF(nn.Module):
 
         t_nears = t_nears.view(-1, 1)
         t_fars = t_fars.view(-1, 1)
-        t_mid = 0.5 * (t_nears + t_fars)
-        x = rays_o[ray_indices] + t_mid * rays_d[ray_indices]
+        t_mids = 0.5 * (t_nears + t_fars)
+        x = rays_o[ray_indices] + t_mids * rays_d[ray_indices]
 
         x.requires_grad_(True)
         embeddings, masks = self.grid(x, interpolation="linear")
 
         # Use zeros for empty space
         # TODO: empty space grid
-        embeddings = torch.where(masks, embeddings, torch.zeros_like(embeddings))
+        embeddings = torch.where(
+            masks.view(-1, 1), embeddings, torch.zeros_like(embeddings)
+        )
 
-        geometry_output = self.geometry_mlp(torch.cat([embeddings, x], dim=-1))
-
-        sdf, geom_embeddings = torch.split(geometry_output, [1, 8], dim=-1)
+        geometry_output = self.geometry_mlp(torch.cat([x, embeddings], dim=-1))
+        sdfs, geom_embeddings = torch.split(geometry_output, [1, 13], dim=-1)
         sdf_grads = torch.autograd.grad(
             outputs=sdfs,
             inputs=x,
@@ -113,9 +134,9 @@ class MonoSDF(nn.Module):
         rgbs = self.color_mlp(
             torch.cat(
                 [
-                    geom_embeddings,
-                    x,
                     rays_d[ray_indices],
+                    geom_embeddings,
+                    normals,
                 ],
                 dim=-1,
             )
@@ -171,9 +192,10 @@ class MonoSDF(nn.Module):
         }
 
     def marching_cubes(self):
-        sdf = self.grid.embeddings[..., 0].contiguous()
-        weight = self.grid.embeddings[..., 4].contiguous()
-        mesh = self.grid.marching_cubes(
+        sdf = self.tsdf_grid.embeddings[..., 0].contiguous()
+
+        weight = self.tsdf_grid.embeddings[..., 4].contiguous()
+        mesh = self.tsdf_grid.marching_cubes(
             sdf,
             weight,
             vertices_only=False,
@@ -228,7 +250,7 @@ if __name__ == "__main__":
         image_only=False,
     )
 
-    model = PlainVoxels(device=torch.device("cuda:0"))
+    model = MonoSDF(device=torch.device("cuda:0"))
     model.fuse_dataset(dataset)
     mesh = model.marching_cubes()
     o3d.visualization.draw([mesh])
@@ -246,11 +268,11 @@ if __name__ == "__main__":
         dataset, batch_size=batch_size, shuffle=True, device=torch.device("cuda:0")
     )
 
-    optim = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-3)
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
-    pbar = tqdm(range(5001))
+    pbar = tqdm(range(50001))
     for step in pbar:
         optim.zero_grad()
         datum = next(iter(train_dataloader))
@@ -288,38 +310,47 @@ if __name__ == "__main__":
         optim.step()
 
         if step % 1000 == 0 and step > 0:
-            mesh = model.marching_cubes()
-            o3d.visualization.draw([mesh])
+            # mesh = model.marching_cubes()
+            # o3d.visualization.draw([mesh])
 
-    # Evaluation
-    for i in range(dataset.num_images):
-        im_rgbs = []
-        im_weights = []
-        im_depths = []
-        im_normals = []
+            # Evaluation
+            for i in range(dataset.num_images):
+                im_rgbs = []
+                im_weights = []
+                im_depths = []
+                im_normals = []
 
-        for b in range(batches_per_image):
-            datum = next(iter(eval_dataloader))
-            rays_o = datum["rays_o"]
-            rays_d = datum["rays_d"]
-            ray_norms = datum["rays_d_norm"]
-            result = model(rays_o, rays_d, ray_norms, near=0.1, far=1.4)
+                for b in range(batches_per_image):
+                    datum = next(iter(eval_dataloader))
+                    rays_o = datum["rays_o"]
+                    rays_d = datum["rays_d"]
+                    ray_norms = datum["rays_d_norm"]
+                    result = model(rays_o, rays_d, ray_norms, near=0.1, far=1.4)
 
-            im_rgbs.append(result["rgb"].detach().cpu().numpy())
-            im_weights.append(result["weights"].detach().cpu().numpy())
-            im_depths.append(result["depth"].detach().cpu().numpy())
-            im_normals.append(result["normal"].detach().cpu().numpy())
+                    im_rgbs.append(result["rgb"].detach().cpu().numpy())
+                    im_weights.append(result["weights"].detach().cpu().numpy())
+                    im_depths.append(result["depth"].detach().cpu().numpy())
+                    im_normals.append(result["normal"].detach().cpu().numpy())
 
-        im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(dataset.H, dataset.W, 3)
-        im_weights = np.concatenate(im_weights, axis=0).reshape(dataset.H, dataset.W, 1)
-        im_depths = np.concatenate(im_depths, axis=0).reshape(dataset.H, dataset.W, 1)
-        im_normals = np.concatenate(im_normals, axis=0).reshape(dataset.H, dataset.W, 3)
+                im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
+                    dataset.H, dataset.W, 3
+                )
+                im_weights = np.concatenate(im_weights, axis=0).reshape(
+                    dataset.H, dataset.W, 1
+                )
+                im_depths = np.concatenate(im_depths, axis=0).reshape(
+                    dataset.H, dataset.W, 1
+                )
+                im_normals = np.concatenate(im_normals, axis=0).reshape(
+                    dataset.H, dataset.W, 3
+                )
 
-        import matplotlib.pyplot as plt
+                import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(2, 2)
-        axes[0, 0].imshow(im_rgbs)
-        axes[0, 1].imshow(im_weights)
-        axes[1, 0].imshow(im_depths)
-        axes[1, 1].imshow(im_normals)
-        plt.show()
+                fig, axes = plt.subplots(2, 2)
+                axes[0, 0].imshow(im_rgbs)
+                axes[0, 1].imshow(im_weights)
+                axes[1, 0].imshow(im_depths)
+                axes[1, 1].imshow(im_normals)
+                plt.show()
+                break
