@@ -70,6 +70,7 @@ try:
                 "ash/src/hashmap.cpp",
                 "ash/src/hashmap_gpu.cu",
                 "ash/src/hashmap_cpu.cpp",
+                "ash/src/sampler.cu",
                 "ash/src/sparsedense_grid.cu"
             ],
             include_dirs=include_dirs,

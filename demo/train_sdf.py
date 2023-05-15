@@ -70,7 +70,7 @@ class NeuralSDF(nn.Module):
 
             self.empty_space_encoder = BoundedSparseDenseGrid(
                 in_dim=3,
-                num_embeddings=64,
+                num_embeddings=4**3,
                 embedding_dim=embedding_dim,
                 grid_dim=1,
                 sparse_grid_dim=4,
@@ -125,6 +125,18 @@ class NeuralSDF(nn.Module):
             return []
 
     def forward(self, positions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        sdf = self.forward_sdf(positions)
+
+        grad_x = torch.autograd.grad(
+            outputs=sdf[..., 0],
+            inputs=positions,
+            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
+            create_graph=True,
+        )[0]
+
+        return sdf, grad_x
+
+    def forward_sdf(self, positions: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         positions.requires_grad_(True)
 
         if self.encoder_type == "ash":
@@ -141,21 +153,22 @@ class NeuralSDF(nn.Module):
         pos_encoding = self.pos_encoder(positions)
         sdf = self.mlp(torch.cat((embedding, pos_encoding), dim=-1))
 
-        grad_x = torch.autograd.grad(
-            outputs=sdf[..., 0],
-            inputs=positions,
-            grad_outputs=torch.ones_like(sdf[..., 0], requires_grad=False),
-            create_graph=True,
-        )[0]
-
-        return sdf, grad_x
+        return sdf
 
     def marching_cubes(self, fname):
         def sdf_fn(x):
-            sdf, grad_x = self.forward(x)
+            sdf = self.forward_sdf(x)
             return sdf.detach()
 
-        create_mesh(sdf_fn, fname, N=256, max_batch=64**3, offset=None, scale=None)
+        create_mesh(
+            sdf_fn,
+            fname,
+            bbox_min=torch.zeros(3),
+            N=256,
+            max_batch=64**3,
+            offset=None,
+            scale=None,
+        )
 
 
 if __name__ == "__main__":
@@ -194,7 +207,27 @@ if __name__ == "__main__":
         occupied_cells = model.visualize_occupied_cells()
         o3d.visualization.draw(occupied_cells + [dataset.pcd, bbox_lineset])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(
+        [
+            {
+                "params": [
+                    param
+                    for name, param in model.named_parameters()
+                    if "empty_space_encoder" in name
+                ],
+                "lr": 1e-3,
+            },
+            {
+                "params": [
+                    param
+                    for name, param in model.named_parameters()
+                    if "empty_space_encoder" not in name
+                ],
+                "lr": 1e-3,
+            },
+        ],
+        lr=1e-3,
+    )
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
     pbar = tqdm(range(5001))

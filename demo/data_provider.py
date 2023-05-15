@@ -200,7 +200,10 @@ class ImageDataset(torch.utils.data.Dataset):
             rgb_ims.append(load_image(self.image_fnames[i], "image"))
             if len(self.normal_fnames) > 0:
                 pbar.set_description(f"Loading {self.normal_fnames[i]}")
-                normal_ims.append(load_image(self.normal_fnames[i], "omni_normal"))
+                normal_im = load_image(self.normal_fnames[i], "omni_normal")
+                normal_im = (normal_im - 0.5) * 2.0
+                normal_im = normal_im / np.linalg.norm(normal_im, axis=-1, keepdims=True)
+                normal_ims.append(normal_im)
             pbar.update()
         self.depth_ims = np.stack(depth_ims)
         self.rgb_ims = np.stack(rgb_ims)
