@@ -428,6 +428,10 @@ class SparseDenseGrid(ASHModule):
         self.neighbor_table_grid2grid = None
 
     @torch.no_grad()
+    def get_bbox(self):
+        return self.bbox_min, self.bbox_max
+
+    @torch.no_grad()
     def _linearize_cell_coords(self, cell_coords: torch.Tensor) -> torch.Tensor:
         assert len(cell_coords.shape) == 2 and cell_coords.shape[1] == self.in_dim
 
@@ -660,11 +664,9 @@ class SparseDenseGrid(ASHModule):
         self,
         rays_o: torch.Tensor,
         rays_d: torch.Tensor,
-        bbox_min: torch.Tensor,
-        bbox_max: torch.Tensor,
         t_min: float,
         t_max: float,
-        t_step: float = 1.0,
+        t_step: float,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample the sparse-dense grid along rays.
         Args:
@@ -691,29 +693,28 @@ class SparseDenseGrid(ASHModule):
             result_ray[i] = accumulate(rgb[ray_prefix_sum[i]:ray_prefix_sum[i + 1]],
                                        density[ray_prefix_sum[i]:ray_prefix_sum[i + 1]])
 
-        Note in this setup, everything is using the unit of 1 cell size.
+        Note in the backend, everything is using the unit of 1 cell size.
         """
-        print(f"rays_o: {rays_o}")
-        print(f"rays_d: {rays_d}")
-        print(f"bbox_min: {bbox_min}")
-        print(f"bbox_Max: {bbox_max}")
+        bbox_min, bbox_max = self.get_bbox()
 
-        print(f"t_min: {t_min}")
-        print(f"t_max: {t_max}")
-        print(f"t_step: {t_step}")
-
-        ray_indices, t_near, t_far, ray_prefix_sum = backend.ray_sample(
+        ray_indices, t_nears, t_fars, ray_prefix_sum = backend.ray_sample(
             self.engine.backend,
-            rays_o,
+            self.transform_world_to_cell(rays_o),
             rays_d,
-            bbox_min,
-            bbox_max,
-            t_min,
-            t_max,
-            t_step,
-            (float)(self.grid_dim),
+            self.transform_world_to_cell(bbox_min),
+            self.transform_world_to_cell(bbox_max),
+            t_min / self.cell_size,
+            t_max / self.cell_size,
+            t_step / self.cell_size,
+            float(self.grid_dim),
         )
-        return ray_indices, t_near, t_far, ray_prefix_sum
+
+        return (
+            ray_indices,
+            t_nears * self.cell_size,
+            t_fars * self.cell_size,
+            ray_prefix_sum,
+        )
 
     def uniform_sample(
         self, num_samples: int, space: Literal["occupied", "empty"] = "occupied"
@@ -858,6 +859,25 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         self.transform_world_to_cell = lambda x: x / self.cell_size
         self.transform_cell_to_world = lambda x: x * self.cell_size
 
+        self.bbox_min = None
+        self.bbox_max = None
+
+    @torch.no_grad()
+    def compute_bbox_(self):
+        active_grid_coords, _ = self.engine.items()
+
+        self.bbox_min = active_grid_coords.min(dim=0, keepdim=True)[0]
+        self.bbox_max = active_grid_coords.max(dim=0, keepdim=True)[0] + 1
+
+        self.bbox_min = self.transform_cell_to_world(self.bbox_min[0] * self.grid_dim)
+        self.bbox_max = self.transform_cell_to_world(self.bbox_max[0] * self.grid_dim)
+
+    @torch.no_grad()
+    def get_bbox(self, force_recompute=False):
+        if self.bbox_min is None or self.bbox_max is None or force_recompute:
+            self.compute_bbox_()
+        return self.bbox_min, self.bbox_max
+
 
 class BoundedSparseDenseGrid(SparseDenseGrid):
     """Create a bounded sparse-dense grid.
@@ -921,8 +941,10 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
             else torch.ones(self.in_dim, device=self.device)
         )
 
-        self.cell_size = (self.bbox_max - self.bbox_min) / (
-            sparse_grid_dim * grid_dim - 1
+        self.cell_size = (
+            ((self.bbox_max - self.bbox_min) / (sparse_grid_dim * grid_dim - 1))
+            .min()
+            .item()
         )
         self.transform_world_to_cell = lambda x: (x - self.bbox_min) / self.cell_size
         self.transform_cell_to_world = lambda x: x * self.cell_size + self.bbox_min
@@ -942,37 +964,3 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         )
 
         self.engine.insert_keys(grid_coords)
-
-    @torch.no_grad()
-    def ray_sample(
-        self,
-        rays_o: torch.Tensor,
-        rays_d: torch.Tensor,
-        t_min: float = None,
-        t_max: float = None,
-        t_step: float = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        factor = self.cell_size.min().item()
-        if t_min is None:
-            t_min = 0.01
-        if t_max is None:
-            t_max = np.sqrt(3)
-        if t_step is None:
-            t_step = factor
-
-        ray_indices, t_nears, t_fars, prefix_sum_ray_sample_counts = super().ray_sample(
-            rays_o=self.transform_world_to_cell(rays_o),
-            rays_d=rays_d,
-            bbox_min=self.transform_world_to_cell(self.bbox_min),
-            bbox_max=self.transform_world_to_cell(self.bbox_max),
-            t_min=t_min / factor,
-            t_max=t_max / factor,
-            t_step=t_step / factor,
-        )
-
-        return (
-            ray_indices,
-            t_nears * factor,
-            t_fars * factor,
-            prefix_sum_ray_sample_counts,
-        )
