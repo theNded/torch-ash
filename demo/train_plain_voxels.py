@@ -39,7 +39,7 @@ class PlainVoxels(nn.Module):
         super().__init__()
         self.grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=10000,
+            num_embeddings=40000,
             embedding_dim=5,
             grid_dim=8,
             sparse_grid_dim=32,
@@ -194,7 +194,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
-    parser.add_argument("--depth_max", type=float, default=4.0, help="max depth value to truncate in meters")
+    parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
     args = parser.parse_args()
     # fmt: on
 
@@ -243,7 +243,9 @@ if __name__ == "__main__":
         depth_gt = datum["depth"]
 
         rgb_loss = F.mse_loss(result["rgb"], rgb_gt)
-        normal_loss = (1 - F.cosine_similarity(result["normal"], normal_gt, dim=-1).mean())
+        normal_loss = (
+            1 - F.cosine_similarity(result["normal"], normal_gt, dim=-1).mean()
+        )
         depth_loss = depth_loss_fn(
             result["depth"].view(-1, 32, 32),
             depth_gt.view(-1, 32, 32),

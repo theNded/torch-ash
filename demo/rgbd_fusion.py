@@ -244,19 +244,15 @@ if __name__ == "__main__":
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
 
-    sdf = fuser.grid.embeddings[..., 0].contiguous()
-    weight = fuser.grid.embeddings[..., 4].contiguous()
-    mesh = fuser.grid.marching_cubes(
-        sdf,
-        weight,
-        vertices_only=False,
-        color_fn=None,
-        normal_fn=None,
-        iso_value=0.0,
-        weight_thr=3.0,
+    fuser.grid.update_bbox_()
+    bbox_min = fuser.grid.bbox_min
+    bbox_max = fuser.grid.bbox_max
+    print(bbox_min, bbox_max)
+    bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(
+        o3d.geometry.AxisAlignedBoundingBox(
+            min_bound=bbox_min.cpu().numpy(), max_bound=bbox_max.cpu().numpy()
+        )
     )
-    mesh.compute_vertex_normals()
-    o3d.visualization.draw([mesh])
 
     dataloader = Dataloader(
         dataset, batch_size=100, shuffle=True, device=torch.device("cuda:0")
@@ -265,16 +261,18 @@ if __name__ == "__main__":
 
     rays_o = datum["rays_o"]
     rays_d = datum["rays_d"]
+    t_min = 0.1
+    t_max = 1.7 if normalize_scene else args.depth_max
     ray_indices, t_nears, t_fars, prefix_sum_ray_samples = fuser.grid.ray_sample(
         rays_o=rays_o,
         rays_d=rays_d,
-        t_min=0.1,
-        t_max=1.4,
+        t_min=t_min,
+        t_max=t_max,
         t_step=0.02,
     )
 
     lineset = o3d.t.geometry.LineSet()
-    positions = torch.cat([rays_o + 0.1 * rays_d, rays_o + 1.4 * rays_d], dim=0)
+    positions = torch.cat([rays_o + t_min * rays_d, rays_o + t_max * rays_d], dim=0)
     indices = torch.cat(
         [
             torch.arange(len(rays_o)).view(-1, 1),
@@ -368,31 +366,4 @@ if __name__ == "__main__":
         iso_value=0.0,
         weight_thr=0.5,
     )
-    o3d.visualization.draw([mesh, lineset, sample_pcd])
-    print(f"sparse grid size before pruning: {fuser.grid.engine.size()}")
-    fuser.prune_(0.5)
-    print(f"sparse grid size after pruning: {fuser.grid.engine.size()}")
-
-    positions = torch.from_numpy(mesh.vertex["positions"].numpy()).to(fuser.grid.device)
-
-    grid = fuser.grid
-    optim = torch.optim.Adam(grid.parameters(), lr=1e-4)
-
-    pbar = tqdm(range(100))
-    for i in pbar:
-        optim.zero_grad()
-
-        positions.requires_grad_(True)
-        grad_x = grad_fn(positions)
-        norm_grad_x = torch.norm(grad_x, dim=-1)
-
-        eikonal_loss = ((norm_grad_x - 1) ** 2).mean()
-        pbar.set_description(f"iteration: {i}, loss: {eikonal_loss.item():.4f}")
-
-        eikonal_loss.backward()
-        optim.step()
-
-    mesh = fuser.grid.marching_cubes(
-        sdf, weight, vertices_only=False, color_fn=color_fn, normal_fn=normal_fn
-    )
-    o3d.visualization.draw(mesh)
+    o3d.visualization.draw([mesh, lineset, sample_pcd, bbox_lineset])
