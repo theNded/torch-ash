@@ -1,3 +1,4 @@
+from typing import Union
 import torch
 import torch.nn.functional as F
 from torch.utils.dlpack import from_dlpack, to_dlpack
@@ -35,14 +36,14 @@ class TSDFFusion:
 
     def __init__(
         self,
-        grid: BoundedSparseDenseGrid,
+        grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid],
     ):
         self.grid = grid
-        self.voxel_size = self.grid.cell_size.min().item()
-        print(
-            f"Use normalized scene with non-metric voxel size {self.voxel_size} in bounding box"
-        )
-        self.trunc = 5 * self.voxel_size
+        if isinstance(self.grid, BoundedSparseDenseGrid):
+            self.voxel_size = self.grid.cell_size.min().item()
+        else:
+            self.voxel_size = self.grid.cell_size
+        self.trunc = 2 * self.voxel_size * self.grid.grid_dim
 
     @torch.no_grad()
     def fuse_dataset(self, dataset):
@@ -149,7 +150,7 @@ class TSDFFusion:
             cell_coords,
             grid_indices,
             cell_indices,
-        ) = self.grid.spatial_init_(points, dilation=1)
+        ) = self.grid.spatial_init_(points, dilation=2, bidirectional=True)
         if len(grid_indices) == 0:
             return
 
@@ -192,35 +193,70 @@ if __name__ == "__main__":
     # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
+    parser.add_argument("--voxel_size", type=float, default=-1)
+    parser.add_argument("--resolution", type=int, default=256)
+
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
-    parser.add_argument("--depth_max", type=float, default=4.0, help="max depth value to truncate in meters")
+    parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
     args = parser.parse_args()
     # fmt: on
+
+    device = torch.device("cuda:0")
+
+    if args.voxel_size > 0:
+        print(
+            f"Using metric voxel size {args.voxel_size}m with UnboundedSparseDenseGrid."
+        )
+        normalize_scene = False
+        grid = UnBoundedSparseDenseGrid(
+            in_dim=3,
+            num_embeddings=80000,
+            embedding_dim=5,
+            grid_dim=8,
+            cell_size=args.voxel_size,
+            device=device,
+        )
+
+    else:
+        print(f"Using resolution {args.resolution} with BoundedSparseDenseGrid.")
+        normalize_scene = True
+        grid = BoundedSparseDenseGrid(
+            in_dim=3,
+            num_embeddings=80000,
+            embedding_dim=5,
+            grid_dim=8,
+            sparse_grid_dim=32,
+            bbox_min=-1 * torch.ones(3, device=device),
+            bbox_max=torch.ones(3, device=device),
+            device=device,
+        )
 
     # Load data
     dataset = ImageDataset(
         args.path,
         depth_type=args.depth_type,
         depth_max=args.depth_max,
-        normalize_scene=True,
+        normalize_scene=normalize_scene,
         image_only=False,
-    )
-
-    device = torch.device('cuda:0')
-    grid = BoundedSparseDenseGrid(
-        in_dim=3,
-        num_embeddings=80000,
-        embedding_dim=5,
-        grid_dim=8,
-        sparse_grid_dim=32,
-        bbox_min=-1 * torch.ones(3, device=device),
-        bbox_max=torch.ones(3, device=device),
-        device=device,
     )
 
     fuser = TSDFFusion(grid)
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
+
+    sdf = fuser.grid.embeddings[..., 0].contiguous()
+    weight = fuser.grid.embeddings[..., 4].contiguous()
+    mesh = fuser.grid.marching_cubes(
+        sdf,
+        weight,
+        vertices_only=False,
+        color_fn=None,
+        normal_fn=None,
+        iso_value=0.0,
+        weight_thr=3.0,
+    )
+    mesh.compute_vertex_normals()
+    o3d.visualization.draw([mesh])
 
     dataloader = Dataloader(
         dataset, batch_size=100, shuffle=True, device=torch.device("cuda:0")
@@ -253,7 +289,6 @@ if __name__ == "__main__":
         rays_o[ray_indices] + 0.5 * (t_nears + t_fars).view(-1, 1) * rays_d[ray_indices]
     )
     sample_pcd = o3d.t.geometry.PointCloud(sample_positions.cpu().numpy())
-
 
     # sdf_fn and weight_fn
     def color_fn(x):
