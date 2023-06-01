@@ -39,10 +39,7 @@ class TSDFFusion:
         grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid],
     ):
         self.grid = grid
-        if isinstance(self.grid, BoundedSparseDenseGrid):
-            self.voxel_size = self.grid.cell_size.min().item()
-        else:
-            self.voxel_size = self.grid.cell_size
+        self.voxel_size = self.grid.cell_size
         self.trunc = 2 * self.voxel_size * self.grid.grid_dim
 
     @torch.no_grad()
@@ -258,14 +255,15 @@ if __name__ == "__main__":
 
     rays_o = datum["rays_o"]
     rays_d = datum["rays_d"]
-    t_min = 0.1
-    t_max = 1.7 if normalize_scene else args.depth_max
+    t_min = 0.1 if normalize_scene else 0.01 # meter
+    t_max = 1.7 if normalize_scene else args.depth_max # meter
+    t_step = 2 * fuser.grid.cell_size
     ray_indices, t_nears, t_fars, prefix_sum_ray_samples = fuser.grid.ray_sample(
         rays_o=rays_o,
         rays_d=rays_d,
         t_min=t_min,
         t_max=t_max,
-        t_step=0.02,
+        t_step=t_step,
     )
 
     lineset = o3d.t.geometry.LineSet()
