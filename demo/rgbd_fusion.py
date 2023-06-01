@@ -244,10 +244,7 @@ if __name__ == "__main__":
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
 
-    fuser.grid.update_bbox_()
-    bbox_min = fuser.grid.bbox_min
-    bbox_max = fuser.grid.bbox_max
-    print(bbox_min, bbox_max)
+    bbox_min, bbox_max = fuser.grid.get_bbox()
     bbox_lineset = o3d.geometry.LineSet.create_from_axis_aligned_bounding_box(
         o3d.geometry.AxisAlignedBoundingBox(
             min_bound=bbox_min.cpu().numpy(), max_bound=bbox_max.cpu().numpy()

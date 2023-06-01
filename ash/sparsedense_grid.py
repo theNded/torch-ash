@@ -428,6 +428,10 @@ class SparseDenseGrid(ASHModule):
         self.neighbor_table_grid2grid = None
 
     @torch.no_grad()
+    def get_bbox(self):
+        return self.bbox_min, self.bbox_max
+
+    @torch.no_grad()
     def _linearize_cell_coords(self, cell_coords: torch.Tensor) -> torch.Tensor:
         assert len(cell_coords.shape) == 2 and cell_coords.shape[1] == self.in_dim
 
@@ -852,7 +856,8 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         self.bbox_min = None
         self.bbox_max = None
 
-    def update_bbox_(self):
+    @torch.no_grad()
+    def compute_bbox_(self):
         active_grid_coords, _ = self.engine.items()
 
         self.bbox_min = active_grid_coords.min(dim=0, keepdim=True)[0]
@@ -860,6 +865,12 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
 
         self.bbox_min = self.transform_cell_to_world(self.bbox_min[0] * self.grid_dim)
         self.bbox_max = self.transform_cell_to_world(self.bbox_max[0] * self.grid_dim)
+
+    @torch.no_grad()
+    def get_bbox(self, force_recompute=False):
+        if self.bbox_min is None or self.bbox_max is None or force_recompute:
+            self.compute_bbox_()
+        return self.bbox_min, self.bbox_max
 
     @torch.no_grad()
     def ray_sample(
@@ -878,13 +889,12 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         if t_step is None:
             t_step = factor
 
-        if self.bbox_min is None or self.bbox_max is None:
-            self.update_bbox_()
+        bbox_min, bbox_max = self.get_bbox()
         ray_indices, t_nears, t_fars, prefix_sum_ray_sample_counts = super().ray_sample(
             rays_o=self.transform_world_to_cell(rays_o),
             rays_d=rays_d,
-            bbox_min=self.transform_world_to_cell(self.bbox_min),
-            bbox_max=self.transform_world_to_cell(self.bbox_max),
+            bbox_min=self.transform_world_to_cell(bbox_min),
+            bbox_max=self.transform_world_to_cell(bbox_max),
             t_min=t_min / factor,
             t_max=t_max / factor,
             t_step=t_step / factor,
