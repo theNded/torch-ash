@@ -38,7 +38,7 @@ def load_image(fname, im_type="image"):
     """
     if fname.suffix == ".npy":
         # Versatile, could work for any image type
-        data = np.load(fname)
+        data = np.load(fname).astype(np.float32)
         if data.shape[0] in [1, 3]:  # normal or depth transposed
             data = data.transpose((1, 2, 0))
         if im_type == "depth":
@@ -47,7 +47,10 @@ def load_image(fname, im_type="image"):
     elif fname.suffix in [".jpg", ".jpeg", ".png", ".pgm"]:
         if im_type == "image":
             # Always normalize RGB to [0, 1]
-            return cv2.imread(str(fname), cv2.IMREAD_COLOR)[..., ::-1] / 255.0
+            return (
+                cv2.imread(str(fname), cv2.IMREAD_COLOR)[..., ::-1].astype(np.float32)
+                / 255.0
+            )
         elif im_type == "depth":
             # Keep depth as they are as unit is usually tricky
             return cv2.imread(str(fname), cv2.IMREAD_UNCHANGED)
@@ -196,13 +199,18 @@ class ImageDataset(torch.utils.data.Dataset):
         for i in pbar:
             pbar.set_description(f"Loading {self.image_fnames[i]}")
             depth_ims.append(load_image(self.depth_fnames[i], "depth"))
+            print(depth_ims[0].dtype)
             pbar.set_description(f"Loading {self.depth_fnames[i]}")
             rgb_ims.append(load_image(self.image_fnames[i], "image"))
+            print(rgb_ims[0].dtype)
             if len(self.normal_fnames) > 0:
                 pbar.set_description(f"Loading {self.normal_fnames[i]}")
                 normal_im = load_image(self.normal_fnames[i], "omni_normal")
+                print(normal_im.dtype)
                 normal_im = (normal_im - 0.5) * 2.0
-                normal_im = normal_im / np.linalg.norm(normal_im, axis=-1, keepdims=True)
+                normal_im = normal_im / np.linalg.norm(
+                    normal_im, axis=-1, keepdims=True
+                )
                 normal_ims.append(normal_im)
             pbar.update()
         self.depth_ims = np.stack(depth_ims)
@@ -246,8 +254,8 @@ class ImageDataset(torch.utils.data.Dataset):
             return
 
         yy, xx = np.meshgrid(np.arange(self.H), np.arange(self.W), indexing="ij")
-        yy = yy.flatten()
-        xx = xx.flatten()
+        yy = yy.flatten().astype(np.float32)
+        xx = xx.flatten().astype(np.float32)
 
         # (H*W, 3)
         rays = np.stack((xx, yy, np.ones_like(xx)), axis=-1).reshape(-1, 3)
