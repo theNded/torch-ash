@@ -20,9 +20,71 @@ Each cell's embedding is stored separately, and can be accessed by
     embeddings[grid_idx, cell_idx].
 """
 
+"""
+One core operation is neighbor look up. It is essential for trilinear interpolation in query, and convolution.
+An intuitive approach would be computing offsets on-the-fly (in kernels):
+    cell_offset_table = [[0,0,0], ..., [cell_radius-1,cell_radius-1,cell_radius-1]]
+    grid_coords, cell_coords = ...
+
+    cell_coord = grid_coords[grid_idx] * grid_dim + cell_coords[cell_idx]
+    for cell_nb in range(cell_radius**3):
+        cell_offset = offset_table[cell_nb]
+
+        cell_nb_coord = cell_coord + cell_offset
+
+        grid_nb_coord = cell_nb_coord // grid_dim
+        cell_nb_coord = cell_nb_coord % grid_dim
+
+        grid_nb_idx = hashmap.find(grid_nb_coord)
+        cell_nb_idx = linearize(cell_nb_coord, grid_dim)
+
+But given a fixed cell search radius, we can cache most of intermediate look up tables
+and remove the usage of hash maps in kernels.
+1. We can estimate the grid search radius by
+    grid_radius = (grid_dim - 1 + cell_radius) // grid_dim
+2. We can then construct a neighbor grid look up table once the active entries are activated:
+    lut_grid_nb2grid_idx = torch.zeros(num_embeddings, grid_radius**3)
+    grid_nb_offsets = compute_offset(grid_radius)
+    grid_indices, grid_coords = grid.items()
+    grid_nb_indices, masks = hashmap.find(grid_coords + grid_nb_offsets)
+    lut_grid_nb2grid_idx[grid_indices] = grid_indices_nb
+    # need to handle boundary cases
+3. Then we construct look up tables for cells:
+    lut_cell_nb2grid_nb = torch.zeros(num_cells_per_grid, cell_radius**3)
+    lut_cell_nb2cell_idx = torch.zeros(num_cells_per_grid, cell_radius**3)
+
+    # Could be vectorized
+    for cell_nb in range(cell_radius**3):
+        cell_nb_offset = offset_table[i]
+        for j in range(num_cells_per_grid):
+            cell_coord = cell_coords[j]
+            cell_nb_coord = cell_coord + cell_nb_offset
+
+            grid_nb_offset = grid_offset // grid_dim
+            cell_nb_coord = cell_offset % grid_dim
+
+            grid_nb = grid_nb_from_offset(grid_nb_offset)
+            lut_cell_nb2grid_nb[cell_nb] = grid_nb
+            lut_cell_nb2cell_idx[cell_nb] = linearize(cell_nb_coord, grid_dim)
+
+To use such luts, we run
+grid_idx, cell_idx = ...
+for cell_nb in range(cell_radius**3):
+    grid_nb = lut_cell_nb2grid_nb[cell_idx, cell_nb]
+    grid_nb_idx = lut_grid_nb2grid_idx[grid_idx, grid_nb]
+    cell_nb_idx = lut_cell_nb2cell_idx[cell_idx, cell_nb]
+
+and we are all set.
+
+The naming conventions are:
+- grid_nb / cell_nb denote the neighbor id within range [0, radius**3]
+- Their associated properties would be grid_nb_idx / grid_nb_coord / cell_nb_idx / cell_nb_coord, etc.
+"""
+
 
 def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Tensor:
     """Generate neighbor coordinate offsets.
+    This function is independent of the choice of grid or cell.
     In the 1-radius, non-bidirectional case, it is equivalent to morton code
     i.e., 001, 010, 011, 100, 101, 110, 111 (3 digits in zyx order)
     Args:
