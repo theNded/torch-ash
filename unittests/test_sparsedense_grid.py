@@ -69,13 +69,13 @@ class TestSparseDenseGrid:
         )
         coords = grid._delinearize_cell_indices(indices)
 
-        nb_indices0 = grid.neighbor_table_cell2cell[indices, 0]
+        nb_indices0 = grid.lut_cell_nb2cell_idx[indices, 0]
         nb_coords0 = grid._delinearize_cell_indices(nb_indices0)
 
         assert torch.all(nb_indices0 == indices)
         assert torch.all(nb_coords0 == coords)
 
-        nb_indices_last = grid.neighbor_table_cell2cell[indices, -1]
+        nb_indices_last = grid.lut_cell_nb2cell_idx[indices, -1]
         nb_coords_last = grid._delinearize_cell_indices(nb_indices_last)
         offset_last = torch.ones_like(nb_coords_last[0])
         nb_coords_last_expected = (coords + offset_last) % grid_dim
@@ -238,9 +238,9 @@ class TestSparseDenseGrid:
                 grid_indices,
                 cell_indices,
                 masks,
-                grid.neighbor_table_grid2grid,
-                grid.neighbor_table_cell2cell,
-                grid.neighbor_table_cell2grid,
+                grid.lut_grid_nb2grid_idx,
+                grid.lut_cell_nb2cell_idx,
+                grid.lut_cell_nb2grid_nb,
                 grid.grid_dim,
                 "linear",
             )
@@ -269,9 +269,9 @@ class TestSparseDenseGrid:
                 grid_indices,
                 cell_indices,
                 masks,
-                grid.neighbor_table_grid2grid,
-                grid.neighbor_table_cell2cell,
-                grid.neighbor_table_cell2grid,
+                grid.lut_grid_nb2grid_idx,
+                grid.lut_cell_nb2cell_idx,
+                grid.lut_cell_nb2grid_nb,
                 grid.grid_dim,
             )
             output = net(torch.cat((output, x_input), dim=-1))
@@ -335,9 +335,9 @@ class TestSparseDenseGrid:
                 grid_indices,
                 cell_indices,
                 masks,
-                grid.neighbor_table_grid2grid,
-                grid.neighbor_table_cell2cell,
-                grid.neighbor_table_cell2grid,
+                grid.lut_grid_nb2grid_idx,
+                grid.lut_cell_nb2cell_idx,
+                grid.lut_cell_nb2grid_nb,
                 grid.grid_dim,
                 "linear",
             )

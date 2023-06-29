@@ -133,9 +133,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
         grid_indices: torch.Tensor,
         cell_indices: torch.Tensor,
         masks: torch.Tensor,
-        neighbor_table_grid2grid: torch.Tensor,
-        neighbor_table_cell2cell: torch.Tensor,
-        neighbor_table_cell2grid: torch.Tensor,
+        lut_grid_nb2grid_idx: torch.Tensor,
+        lut_cell_nb2cell_idx: torch.Tensor,
+        lut_cell_nb2grid_nb: torch.Tensor,
         grid_dim: int,
         interpolation: Literal["linear", "smooth_step"] = "smooth_step",
     ) -> torch.Tensor:
@@ -151,9 +151,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             cell_indices: (num_queries, 1) cell index of the input
             masks: (num_queries, 1) mask of the input
 
-            neighbor_table_grid2grid: (num_embeddings, 8) precomputed neighbor table from grid index to grid index
-            neighbor_table_cell2cell: (cells_per_grid, 8) precomputed neighbor table from cell index to cell index
-            neighbor_table_cell2grid: (cells_per_grid, 8) precomputed neighbor table from cell index to grid index
+            lut_grid_nb2grid_idx: (num_embeddings, 8) precomputed neighbor table from grid index to grid index
+            lut_cell_nb2cell_idx: (cells_per_grid, 8) precomputed neighbor table from cell index to cell index
+            lut_cell_nb2grid_nb: (cells_per_grid, 8) precomputed neighbor table from cell index to grid index
 
             grid_dim: int cells_per_grid = grid_dim**3
 
@@ -166,9 +166,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
         )
 
         ctx.grid_dim = grid_dim
@@ -180,9 +180,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
             grid_dim,
             interpolation,
         )
@@ -201,9 +201,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
         ) = ctx.saved_tensors
 
         grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
@@ -213,9 +213,9 @@ class SparseDenseGridQuery(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
             ctx.grid_dim,
             ctx.interpolation,
         )
@@ -244,9 +244,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
         grid_indices,
         cell_indices,
         masks,
-        neighbor_table_grid2grid,
-        neighbor_table_cell2cell,
-        neighbor_table_cell2grid,
+        lut_grid_nb2grid_idx,
+        lut_cell_nb2cell_idx,
+        lut_cell_nb2grid_nb,
         grid_dim,
         interpolation,
     ):
@@ -288,9 +288,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
         )
         ctx.grid_dim = grid_dim
         ctx.interpolation = interpolation
@@ -302,9 +302,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
             grid_dim,
             interpolation,
         )
@@ -352,9 +352,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
         ) = ctx.saved_tensors
 
         grad_z, grad_embeddings, grad_offsets = backend.query_backward_backward(
@@ -366,9 +366,9 @@ class SparseDenseGridQueryBackward(torch.autograd.Function):
             grid_indices,
             cell_indices,
             masks,
-            neighbor_table_grid2grid,
-            neighbor_table_cell2cell,
-            neighbor_table_cell2grid,
+            lut_grid_nb2grid_idx,
+            lut_cell_nb2cell_idx,
+            lut_cell_nb2grid_nb,
             ctx.grid_dim,
             ctx.interpolation,
         )
@@ -467,19 +467,19 @@ class SparseDenseGrid(ASHModule):
         ).view(-1, 3)
 
         cell_boundary_mask = (dense_neighbor_coords == grid_dim).long()
-        self.neighbor_table_cell2grid = torch.zeros(
+        self.lut_cell_nb2grid_nb = torch.zeros(
             self.num_cells_per_grid * 2**in_dim, device=self.device, dtype=torch.long
         )
         for i in range(in_dim):
-            self.neighbor_table_cell2grid = (
-                self.neighbor_table_cell2grid + cell_boundary_mask[:, i] * (2**i)
+            self.lut_cell_nb2grid_nb = (
+                self.lut_cell_nb2grid_nb + cell_boundary_mask[:, i] * (2**i)
             )
 
-        self.neighbor_table_cell2cell = self._linearize_cell_coords(
+        self.lut_cell_nb2cell_idx = self._linearize_cell_coords(
             dense_neighbor_coords % grid_dim
         ).view(self.num_cells_per_grid, -1)
 
-        assert self.neighbor_table_cell2cell.shape == (
+        assert self.lut_cell_nb2cell_idx.shape == (
             self.num_cells_per_grid,
             2**in_dim,
         )
@@ -487,7 +487,7 @@ class SparseDenseGrid(ASHModule):
         # Sparse grid look up tables for each grid and their neighbors
         # Need to be constructed after spatial intialization
         self.grid_coords = None
-        self.neighbor_table_grid2grid = None
+        self.lut_grid_nb2grid_idx = None
 
     @torch.no_grad()
     def get_bbox(self):
@@ -525,7 +525,7 @@ class SparseDenseGrid(ASHModule):
         Used for trilinear interpolation in query and marching cubes.
         Updates:
             self.grid_coords: (num_embeddings, in_dim)
-            self.neighbor_table_grid2grid: (num_embeddings, 2**in_dim)
+            self.lut_grid_nb2grid_idx: (num_embeddings, 2**in_dim)
         For non-active entries, the neighbor indices are set to -1.
         """
         active_grid_coords, active_grid_indices = self.engine.items()
@@ -549,11 +549,11 @@ class SparseDenseGrid(ASHModule):
         self.grid_coords.fill_(-1)
         self.grid_coords[active_grid_indices] = active_grid_coords
 
-        self.neighbor_table_grid2grid = torch.empty(
+        self.lut_grid_nb2grid_idx = torch.empty(
             self.num_embeddings, 2**self.in_dim, dtype=torch.int64, device=self.device
         )
-        self.neighbor_table_grid2grid.fill_(-1)
-        self.neighbor_table_grid2grid[
+        self.lut_grid_nb2grid_idx.fill_(-1)
+        self.lut_grid_nb2grid_idx[
             active_grid_indices
         ] = active_sparse_neighbor_indices.view(-1, 8)
 
@@ -595,7 +595,7 @@ class SparseDenseGrid(ASHModule):
             return self.embeddings[grid_indices, cell_indices], masks
 
         elif interpolation in ["linear", "smooth_step"]:
-            if self.grid_coords is None or self.neighbor_table_grid2grid is None:
+            if self.grid_coords is None or self.lut_grid_nb2grid_idx is None:
                 self.construct_sparse_neighbor_tables_()
 
             features = SparseDenseGridQuery.apply(
@@ -604,9 +604,9 @@ class SparseDenseGrid(ASHModule):
                 grid_indices,
                 cell_indices,
                 masks,
-                self.neighbor_table_grid2grid,
-                self.neighbor_table_cell2cell,
-                self.neighbor_table_cell2grid,
+                self.lut_grid_nb2grid_idx,
+                self.lut_cell_nb2cell_idx,
+                self.lut_cell_nb2grid_nb,
                 self.grid_dim,
                 interpolation,
             )
@@ -813,7 +813,7 @@ class SparseDenseGrid(ASHModule):
             weight_thr: weight threshold to consider a cell as occupied
         """
 
-        if self.grid_coords is None or self.neighbor_table_grid2grid is None:
+        if self.grid_coords is None or self.lut_grid_nb2grid_idx is None:
             self.construct_sparse_neighbor_tables_()
 
         # Get active entries
@@ -825,10 +825,10 @@ class SparseDenseGrid(ASHModule):
                 weights,
                 grid_indices,
                 self.grid_coords,
-                self.neighbor_table_grid2grid,
+                self.lut_grid_nb2grid_idx,
                 self.cell_coords,
-                self.neighbor_table_cell2cell,
-                self.neighbor_table_cell2grid,
+                self.lut_cell_nb2cell_idx,
+                self.lut_cell_nb2grid_nb,
                 self.grid_dim,
                 iso_value,
                 weight_thr,
@@ -852,10 +852,10 @@ class SparseDenseGrid(ASHModule):
                 weights,
                 grid_indices,
                 self.grid_coords,
-                self.neighbor_table_grid2grid,
+                self.lut_grid_nb2grid_idx,
                 self.cell_coords,
-                self.neighbor_table_cell2cell,
-                self.neighbor_table_cell2grid,
+                self.lut_cell_nb2cell_idx,
+                self.lut_cell_nb2grid_nb,
                 self.grid_dim,
                 iso_value,
                 weight_thr,

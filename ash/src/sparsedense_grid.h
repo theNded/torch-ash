@@ -11,10 +11,10 @@ at::Tensor query_forward(
         const at::Tensor& cell_indices,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
-        const at::Tensor& neighbor_table_cell2cell,
-        const at::Tensor& neighbor_table_cell2grid,
+        const at::Tensor& lut_cell_nb2cell_idx,
+        const at::Tensor& lut_cell_nb2grid_nb,
         const int64_t grid_dim,
         const std::string& interpolation);
 
@@ -38,10 +38,10 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
         const at::Tensor& cell_indices,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
-        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
-        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const std::string& interpolation);
 
@@ -74,10 +74,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& cell_indices,
         const at::Tensor& masks,
         // sparse luts
-        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
-        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
-        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const std::string& interpolation);
 
@@ -87,12 +87,12 @@ at::Tensor isosurface_extraction(
         // query
         const at::Tensor& grid_indices,
         // sparse luts
-        const at::Tensor& grid_coords_table,         // (N, 3)
-        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
+        const at::Tensor& grid_coords_table,     // (N, 3)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
         const at::Tensor& cell_coords_table,
-        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
-        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);
@@ -103,12 +103,12 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
         // query
         const at::Tensor& grid_indices,
         // sparse luts
-        const at::Tensor& grid_coords_table,         // (N, 3)
-        const at::Tensor& neighbor_table_grid2grid,  // (N, 1)
+        const at::Tensor& grid_coords_table,     // (N, 3)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
         const at::Tensor& cell_coords_table,
-        const at::Tensor& neighbor_table_cell2cell,  // (M^3, 8)
-        const at::Tensor& neighbor_table_cell2grid,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr);
@@ -116,10 +116,10 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
 // Only provide forward convolution (interpolation) for now
 at::Tensor convolution_forward(
         const at::Tensor& embeddings,
-        const at::Tensor& weights,                   // (K window)
-        const at::Tensor& grid_indices,              // (N, 1)
-        const at::Tensor& cell_indices,              // (M^3, 8)
-        const at::Tensor& neighbor_table_grid2grid,  // (N, K^3)
-        const at::Tensor& neighbor_table_cell2cell,  // (M^3, K^3)
-        const at::Tensor& neighbor_table_cell2grid,  // (M^3, K^3)
+        const at::Tensor& weights,               // (K window)
+        const at::Tensor& grid_indices,          // (N, 1)
+        const at::Tensor& cell_indices,          // (M^3, 8)
+        const at::Tensor& lut_grid_nb2grid_idx,  // (N, K^3)
+        const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, K^3)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, K^3)
         const int64_t grid_dim);
