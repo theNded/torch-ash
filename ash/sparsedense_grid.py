@@ -82,7 +82,9 @@ The naming conventions are:
 """
 
 
-def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Tensor:
+def enumerate_neighbor_coord_offsets(
+    dim: int, radius: int, bidirectional: bool, device: torch.device
+) -> torch.Tensor:
     """Generate neighbor coordinate offsets.
     This function is independent of the choice of grid or cell.
     In the 1-radius, non-bidirectional case, it is equivalent to morton code
@@ -98,18 +100,31 @@ def enumerate_neighbors(dim: int, radius: int, bidirectional: bool) -> torch.Ten
           returns a tensor of shape ((radius + 1) ** dim, dim)
     """
     if bidirectional:
-        arange = torch.arange(-radius, radius + 1)
+        arange = torch.arange(-radius, radius + 1, device=device)
     else:
-        arange = torch.arange(0, radius + 1)
+        arange = torch.arange(0, radius + 1, device=device)
 
-    offsets = (
+    idx2offset = (
         torch.stack(torch.meshgrid(*[arange for _ in range(dim)], indexing="ij"))
         .reshape(dim, -1)
         .T.flip(dims=(1,))  # zyx order => xyz for easier adding
         .contiguous()
     )
 
-    return offsets
+    def fn_offset2idx(offset):
+        """
+        offset: (N, 3)
+        returns idx: (N, 1)
+        """
+        assert len(offset.shape) == 2
+        padding = radius if bidirectional else 0
+        window = 2 * radius + 1 if bidirectional else radius + 1
+        idx = torch.zeros_like(offset[:, 0])
+        for i in range(dim - 1, -1, -1):
+            idx = (offset[:, i] + padding) + idx * window
+        return idx
+
+    return idx2offset, fn_offset2idx
 
 
 class SparseDenseGridQuery(torch.autograd.Function):
@@ -450,11 +465,6 @@ class SparseDenseGrid(ASHModule):
             )
         )
 
-        # 8 neighbors for trilinear interpolation reshaped for boradcasting
-        self.neighbor_coord_offsets = (
-            enumerate_neighbors(in_dim, 1, False).to(self.device).view(1, -1, in_dim)
-        )
-
         # Dense grid look up tables for each cell and their neighbors
         self.cell_indices = torch.arange(
             self.num_cells_per_grid, dtype=torch.long, device=self.device
@@ -462,32 +472,118 @@ class SparseDenseGrid(ASHModule):
         self.cell_coords = self._delinearize_cell_indices(self.cell_indices)
         assert self.cell_coords.shape == (self.num_cells_per_grid, in_dim)
 
-        dense_neighbor_coords = (
-            self.cell_coords.view(-1, 1, in_dim) + self.neighbor_coord_offsets
-        ).view(-1, 3)
-
-        cell_boundary_mask = (dense_neighbor_coords == grid_dim).long()
-        self.lut_cell_nb2grid_nb = torch.zeros(
-            self.num_cells_per_grid * 2**in_dim, device=self.device, dtype=torch.long
-        )
-        for i in range(in_dim):
-            self.lut_cell_nb2grid_nb = (
-                self.lut_cell_nb2grid_nb + cell_boundary_mask[:, i] * (2**i)
-            )
-
-        self.lut_cell_nb2cell_idx = self._linearize_cell_coords(
-            dense_neighbor_coords % grid_dim
-        ).view(self.num_cells_per_grid, -1)
-
-        assert self.lut_cell_nb2cell_idx.shape == (
-            self.num_cells_per_grid,
-            2**in_dim,
-        )
+        (
+            self.lut_cell_nb2grid_nb,
+            self.lut_cell_nb2cell_idx,
+        ) = self.construct_cell_neighbor_lut(radius=1, bidirectional=False)
+        print(self.lut_cell_nb2grid_nb)
+        print(self.lut_cell_nb2cell_idx)
 
         # Sparse grid look up tables for each grid and their neighbors
         # Need to be constructed after spatial intialization
         self.grid_coords = None
         self.lut_grid_nb2grid_idx = None
+
+    @torch.no_grad()
+    def construct_cell_neighbor_lut(
+        self, radius, bidirectional
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        (
+            cell_coord_offsets,
+            cell_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim, radius, bidirectional, self.device
+        )
+
+        (
+            grid_coord_offsets,
+            grid_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim,
+            (radius + self.grid_dim - 1) // self.grid_dim,
+            bidirectional,
+            self.device,
+        )
+
+        assert self.cell_coords is not None
+        cell_nb_coords = self.cell_coords.view(
+            -1, 1, self.in_dim
+        ) + cell_coord_offsets.view(1, -1, self.in_dim)
+
+        cell_nb_coords = cell_nb_coords.view(-1, self.in_dim)
+
+        grid_nb_offsets = (cell_nb_coords // self.grid_dim).long()
+        cell_nb_coords = torch.remainder(cell_nb_coords, self.grid_dim)
+        cell_nb_indices = self._linearize_cell_coords(cell_nb_coords)
+
+        grid_nbs = grid_coord_fn_offset2idx(grid_nb_offsets)
+
+        # import ipdb;
+        # ipdb.set_trace()
+
+        return grid_nbs.view(self.num_cells_per_grid, -1, 1), cell_nb_indices.view(
+            self.num_cells_per_grid, -1, 1
+        )
+
+    @torch.no_grad()
+    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
+        self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
+            radius, bidirectional
+        )
+
+    @torch.no_grad()
+    def construct_grid_neighbor_lut(
+        self, radius, bidirectional
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Construct a neighbor lookup table for the sparse-dense grid.
+        This should only be called once the sparse grid is initialized.
+        Used for trilinear interpolation in query and marching cubes.
+        Updates:
+            self.grid_coords: (num_embeddings, in_dim)
+            self.lut_grid_nb2grid_idx: (num_embeddings, 2**in_dim)
+        For non-active entries, the neighbor indices are set to -1.
+        """
+        active_grid_coords, active_grid_indices = self.engine.items()
+
+        (
+            grid_coord_offsets,
+            grid_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim,
+            radius,
+            bidirectional,
+            self.device,
+        )
+        num_nbs = len(grid_coord_offsets)
+        print(f"num grid nbs: {num_nbs}")
+
+        active_grid_nb_coords = (
+            active_grid_coords.view(-1, 1, self.in_dim).int()
+            + grid_coord_offsets.view(1, -1, self.in_dim).int()
+        ).view(-1, self.in_dim)
+
+        # (N*2**in_dim, ), (N*2**in_dim, )
+        active_grid_nb_indices, active_grid_nb_masks = self.engine.find(
+            active_grid_nb_coords
+        )
+        # Set not found neighbor indices to -1
+        active_grid_nb_indices[~active_grid_nb_masks] = -1
+
+        # Create a dense lookup table for sparse coords and neighbor indices
+        grid_coords = torch.empty(
+            (self.num_embeddings, self.in_dim), dtype=torch.int32, device=self.device
+        )
+        grid_coords.fill_(-1)
+        grid_coords[active_grid_indices] = active_grid_coords
+
+        lut_grid_nb2grid_idx = torch.empty(
+            self.num_embeddings, num_nbs, dtype=torch.int64, device=self.device
+        )
+        lut_grid_nb2grid_idx.fill_(-1)
+        lut_grid_nb2grid_idx[active_grid_indices] = active_grid_nb_indices.view(
+            -1, num_nbs
+        )
+        return grid_coords, lut_grid_nb2grid_idx
 
     @torch.no_grad()
     def get_bbox(self):
@@ -517,45 +613,6 @@ class SparseDenseGrid(ASHModule):
             )
         cell_coords = torch.stack(cell_coords, dim=1)
         return cell_coords.int()
-
-    @torch.no_grad()
-    def construct_sparse_neighbor_tables_(self, radius=1, bidirection=False) -> None:
-        """Construct a neighbor lookup table for the sparse-dense grid.
-        This should only be called once the sparse grid is initialized.
-        Used for trilinear interpolation in query and marching cubes.
-        Updates:
-            self.grid_coords: (num_embeddings, in_dim)
-            self.lut_grid_nb2grid_idx: (num_embeddings, 2**in_dim)
-        For non-active entries, the neighbor indices are set to -1.
-        """
-        active_grid_coords, active_grid_indices = self.engine.items()
-
-        active_sparse_neighbor_coords = (
-            active_grid_coords.view(-1, 1, self.in_dim).int()
-            + self.neighbor_coord_offsets.view(1, -1, self.in_dim).int()
-        ).view(-1, self.in_dim)
-
-        # (N*2**in_dim, ), (N*2**in_dim, )
-        active_sparse_neighbor_indices, active_sparse_neighbor_masks = self.engine.find(
-            active_sparse_neighbor_coords
-        )
-        # Set not found neighbor indices to -1
-        active_sparse_neighbor_indices[~active_sparse_neighbor_masks] = -1
-
-        # Create a dense lookup table for sparse coords and neighbor indices
-        self.grid_coords = torch.empty(
-            (self.num_embeddings, self.in_dim), dtype=torch.int32, device=self.device
-        )
-        self.grid_coords.fill_(-1)
-        self.grid_coords[active_grid_indices] = active_grid_coords
-
-        self.lut_grid_nb2grid_idx = torch.empty(
-            self.num_embeddings, 2**self.in_dim, dtype=torch.int64, device=self.device
-        )
-        self.lut_grid_nb2grid_idx.fill_(-1)
-        self.lut_grid_nb2grid_idx[
-            active_grid_indices
-        ] = active_sparse_neighbor_indices.view(-1, 8)
 
     def query(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns:
@@ -596,7 +653,8 @@ class SparseDenseGrid(ASHModule):
 
         elif interpolation in ["linear", "smooth_step"]:
             if self.grid_coords is None or self.lut_grid_nb2grid_idx is None:
-                self.construct_sparse_neighbor_tables_()
+                self.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
+            # import ipdb; ipdb.set_trace();
 
             features = SparseDenseGridQuery.apply(
                 self.embeddings,
@@ -677,16 +735,16 @@ class SparseDenseGrid(ASHModule):
         grid_coords = torch.floor(points / self.grid_dim).int()
         grid_coords = self.grids_in_bound(grid_coords)
 
-        neighbor_coord_offsets = enumerate_neighbors(
-            self.in_dim, dilation, bidirectional=bidirectional
-        ).to(self.device)
-        grid_coords_with_neighbors = (
-            grid_coords.view(-1, 1, 3) + neighbor_coord_offsets
-        ).view(-1, 3)
+        grid_nb_coord_offsets, _ = enumerate_neighbor_coord_offsets(
+            self.in_dim, dilation, bidirectional=bidirectional, device=self.device
+        )
+        grid_nb_coords = (grid_coords.view(-1, 1, 3) + grid_nb_coord_offsets).view(
+            -1, 3
+        )
 
         # No need to use a huge hash set due to the duplicates
         hash_set = HashSet(key_dim=3, capacity=len(grid_coords), device=self.device)
-        hash_set.insert(grid_coords_with_neighbors)
+        hash_set.insert(grid_nb_coords)
         unique_grid_coords = hash_set.keys()
         unique_grid_coords = self.grids_in_bound(unique_grid_coords)
 

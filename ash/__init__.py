@@ -4,7 +4,7 @@ from .core import ASHEngine, ASHModule
 from .hashmap import HashMap, HashSet
 from .embedding import HashEmbedding
 from .sparsedense_grid import (
-    enumerate_neighbors,
+    enumerate_neighbor_coord_offsets,
     SparseDenseGridQuery,
     SparseDenseGridQueryBackward,
     SparseDenseGrid,

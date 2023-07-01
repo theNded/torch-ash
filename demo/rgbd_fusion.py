@@ -124,7 +124,7 @@ class TSDFFusion:
             if mask.sum() > 0:
                 self.grid.engine.erase(grid_coords_batch[mask].squeeze(1))
                 self.grid.embeddings[grid_indices_batch[mask]] = 0
-        self.grid.construct_sparse_neighbor_tables_()
+        self.grid.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
 
     @torch.no_grad()
     def fuse_frame(self, datum):
@@ -255,8 +255,8 @@ if __name__ == "__main__":
 
     rays_o = datum["rays_o"]
     rays_d = datum["rays_d"]
-    t_min = 0.1 if normalize_scene else 0.01 # meter
-    t_max = 1.7 if normalize_scene else args.depth_max # meter
+    t_min = 0.1 if normalize_scene else 0.01  # meter
+    t_max = 1.7 if normalize_scene else args.depth_max  # meter
     t_step = 2 * fuser.grid.cell_size
     ray_indices, t_nears, t_fars, prefix_sum_ray_samples = fuser.grid.ray_sample(
         rays_o=rays_o,
