@@ -1,4 +1,14 @@
-from typing import List, Union, Tuple, Dict, OrderedDict, Optional, Literal, overload
+from typing import (
+    List,
+    Union,
+    Tuple,
+    Dict,
+    OrderedDict,
+    Optional,
+    Literal,
+    overload,
+    Callable,
+)
 
 import torch
 import torch.nn as nn
@@ -84,7 +94,7 @@ The naming conventions are:
 
 def enumerate_neighbor_coord_offsets(
     dim: int, radius: int, bidirectional: bool, device: torch.device
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
     """Generate neighbor coordinate offsets.
     This function is independent of the choice of grid or cell.
     In the 1-radius, non-bidirectional case, it is equivalent to morton code
@@ -111,7 +121,7 @@ def enumerate_neighbor_coord_offsets(
         .contiguous()
     )
 
-    def fn_offset2idx(offset):
+    def fn_offset2idx(offset: torch.Tensor) -> torch.Tensor:
         """
         offset: (N, 3)
         returns idx: (N, 1)
@@ -472,13 +482,13 @@ class SparseDenseGrid(ASHModule):
         self.cell_coords = self._delinearize_cell_indices(self.cell_indices)
         assert self.cell_coords.shape == (self.num_cells_per_grid, in_dim)
 
+        # These LUTs only depend on grid_dim
         (
             self.lut_cell_nb2grid_nb,
             self.lut_cell_nb2cell_idx,
         ) = self.construct_cell_neighbor_lut(radius=1, bidirectional=False)
-        print(self.lut_cell_nb2grid_nb)
-        print(self.lut_cell_nb2cell_idx)
 
+        # These LUTs and properties depend on active entries at runtime.
         # Sparse grid look up tables for each grid and their neighbors
         # Need to be constructed after spatial intialization
         self.grid_coords = None
@@ -518,18 +528,10 @@ class SparseDenseGrid(ASHModule):
 
         grid_nbs = grid_coord_fn_offset2idx(grid_nb_offsets)
 
-        # import ipdb;
-        # ipdb.set_trace()
+        lut_cell_nb2grid_nb = grid_nbs.view(self.num_cells_per_grid, -1, 1)
+        lut_cell_nb2cell_idx = cell_nb_indices.view(self.num_cells_per_grid, -1, 1)
 
-        return grid_nbs.view(self.num_cells_per_grid, -1, 1), cell_nb_indices.view(
-            self.num_cells_per_grid, -1, 1
-        )
-
-    @torch.no_grad()
-    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
-        self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
-            radius, bidirectional
-        )
+        return lut_cell_nb2grid_nb, lut_cell_nb2cell_idx
 
     @torch.no_grad()
     def construct_grid_neighbor_lut(
@@ -584,6 +586,12 @@ class SparseDenseGrid(ASHModule):
             -1, num_nbs
         )
         return grid_coords, lut_grid_nb2grid_idx
+
+    @torch.no_grad()
+    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
+        self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
+            radius, bidirectional
+        )
 
     @torch.no_grad()
     def get_bbox(self):
@@ -654,7 +662,6 @@ class SparseDenseGrid(ASHModule):
         elif interpolation in ["linear", "smooth_step"]:
             if self.grid_coords is None or self.lut_grid_nb2grid_idx is None:
                 self.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
-            # import ipdb; ipdb.set_trace();
 
             features = SparseDenseGridQuery.apply(
                 self.embeddings,
@@ -721,7 +728,7 @@ class SparseDenseGrid(ASHModule):
 
     def spatial_init_(
         self, points: torch.Tensor, dilation: int = 1, bidirectional: bool = False
-    ) -> None:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Initialize the grid with points in the world coordinate system.
         Args:
             keys: (N, in_dim) tensor of points in the world coordinate system
@@ -847,6 +854,91 @@ class SparseDenseGrid(ASHModule):
             samples: (num_samples, in_dim) tensor of samples
         """
         pass
+
+    def gaussian_filter(self, size, sigma):
+        """Gaussian filter.
+        Args:
+            radius: radius of the filter
+            sigma: sigma of the gaussian
+        Returns:
+            weights: (2R+1, 2R+1, 2R+1) tensor of weights
+        """
+        assert size % 2 == 1, "size must be odd"
+
+        import scipy.stats as st
+
+        def gkern(size, nsig, dim=2):
+            x = np.linspace(-nsig, nsig, size + 1)
+
+            kern1d = np.diff(st.norm.cdf(x))
+            if dim == 1:
+                return torch.from_numpy(kern1d / kern1d.sum()).float()
+
+            kern2d = np.outer(kern1d, kern1d)
+            if dim == 2:
+                return torch.from_numpy(kern2d / kern2d.sum()).float()
+
+            kern3d = np.outer(kern1d, kern2d).reshape((size, size, size))
+            if dim == 3:
+                return torch.from_numpy(kern3d / kern3d.sum()).float()
+
+            raise NotImplementedError("Unsupported dimension")
+
+        embedding_dim = self.embeddings.shape[-1]
+        weights = (
+            gkern(size, sigma, dim=3)
+            .view(size, size, size, 1)
+            .repeat(1, 1, 1, embedding_dim)
+        )
+
+        output = self.convolution(self.embeddings, weights)
+        return output
+
+    def convolution(self, inputs, weights):
+        # inputs: (num_embeddings, num_cells_per_grid, in_dim)
+        # Input shape check -- need to be the same as the grid structure
+        assert inputs.iscontiguous()
+        assert inputs.shape[:2] == self.embeddings.shape[:2]
+
+        # weights: (2R+1, 2R+1, 2R+1, in_dim, output_dim)
+        # Weight shape check
+        assert weights.iscontiguous()
+        assert len(weights.shape) == 5
+        assert weights.shape[0] % 2 == 1
+        radius = weights.shape[0] // 2
+        for d in range(3):
+            assert weights.shape[d] == 2 * radius + 1
+        assert weights.shape[3] == inputs.shape[-1]
+
+        (
+            conv_lut_cell_nb2grid_nb,
+            conv_lut_cell_nb2cell_idx,
+        ) = self.construct_cell_neighbor_lut(radius, bidirectional=True)
+
+        num_cell_nbs = conv_lut_cell_nb2grid_nb.shape[1]
+
+        grid_radius = (radius + self.grid_dim - 1) // self.grid_dim
+        conv_grid_coords, conv_lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
+            grid_radius, bidirectional=True
+        )
+
+        grid_coords, cell_coords, grid_indices, cell_indices = self.items()
+
+        weights = weights.view(num_cell_nbs, *weights.shape[-2:])
+        output = backend.convolution_forward(
+            inputs,
+            weights,
+            torch.zeros_like(inputs),
+            grid_indices,
+            cell_indices,
+            conv_lut_grid_nb2grid_idx,
+            conv_lut_cell_nb2cell_idx,
+            conv_lut_cell_nb2grid_nb,
+            num_cell_nbs,
+            self.grid_dim,
+        )
+
+        return output
 
     def marching_cubes(
         self,

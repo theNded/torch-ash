@@ -115,11 +115,13 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
 
 // Only provide forward convolution (interpolation) for now
 at::Tensor convolution_forward(
-        const at::Tensor& embeddings,
-        const at::Tensor& weights,               // (K window)
+        const at::Tensor& inputs,
+        const at::Tensor& weights,  // (K window)
+        const at::Tensor& masks,
         const at::Tensor& grid_indices,          // (N, 1)
         const at::Tensor& cell_indices,          // (M^3, 8)
         const at::Tensor& lut_grid_nb2grid_idx,  // (N, K^3)
         const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, K^3)
         const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, K^3)
+        const int64_t num_cell_nbs,
         const int64_t grid_dim);

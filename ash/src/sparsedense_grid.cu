@@ -99,7 +99,7 @@ __global__ void query_forward_kernel(
             lut_cell_nb2grid_nb[cell_idx];
 
     // TODO: dispatch feature dims for efficient caching
-    MiniVec<scalar_t, 16> local_sum_output = MiniVec<scalar_t, 16>::zeros();
+    auto local_sum_output = MiniVec<scalar_t, 16>::zeros();
 
     // TODO: revisit strategies for boundary voxels with less than 8 neighbors
     // At current: return directly
@@ -279,25 +279,27 @@ std::tuple<at::Tensor, at::Tensor> query_backward_forward(
     AT_DISPATCH_FLOATING_TYPES(
             embeddings.scalar_type(), "query_backward_forward_kernel", [&] {
                 DISPATCH_INTERP_FUNCTOR(interpolation, [&] {
-                    query_backward_forward_kernel<
-                            InterpFunctor, DiffInterpFunctor,
-                            scalar_t><<<blocks, threads>>>(
-                            z.data_ptr<scalar_t>(),
-                            embeddings.data_ptr<scalar_t>(),
-                            static_cast<MiniVec<float, 3>*>(offsets.data_ptr()),
-                            grid_indices.data_ptr<int64_t>(),
-                            cell_indices.data_ptr<int64_t>(),
-                            masks.data_ptr<bool>(),
-                            static_cast<MiniVec<int64_t, 8>*>(
-                                    lut_grid_nb2grid_idx.data_ptr()),
-                            static_cast<MiniVec<int64_t, 8>*>(
-                                    lut_cell_nb2cell_idx.data_ptr()),
-                            static_cast<MiniVec<int64_t, 8>*>(
-                                    lut_cell_nb2grid_nb.data_ptr()),
-                            grad_embeddings.data_ptr<scalar_t>(),
-                            static_cast<MiniVec<scalar_t, 3>*>(
-                                    grad_offsets.data_ptr()),
-                            grid_dim, num_cells_per_grid, embedding_dims, len);
+                    query_backward_forward_kernel<InterpFunctor,
+                                                  DiffInterpFunctor, scalar_t>
+                            <<<blocks, threads>>>(
+                                    z.data_ptr<scalar_t>(),
+                                    embeddings.data_ptr<scalar_t>(),
+                                    static_cast<MiniVec<float, 3>*>(
+                                            offsets.data_ptr()),
+                                    grid_indices.data_ptr<int64_t>(),
+                                    cell_indices.data_ptr<int64_t>(),
+                                    masks.data_ptr<bool>(),
+                                    static_cast<MiniVec<int64_t, 8>*>(
+                                            lut_grid_nb2grid_idx.data_ptr()),
+                                    static_cast<MiniVec<int64_t, 8>*>(
+                                            lut_cell_nb2cell_idx.data_ptr()),
+                                    static_cast<MiniVec<int64_t, 8>*>(
+                                            lut_cell_nb2grid_nb.data_ptr()),
+                                    grad_embeddings.data_ptr<scalar_t>(),
+                                    static_cast<MiniVec<scalar_t, 3>*>(
+                                            grad_offsets.data_ptr()),
+                                    grid_dim, num_cells_per_grid,
+                                    embedding_dims, len);
                 });
             });
     C10_CUDA_CHECK(cudaDeviceSynchronize());
@@ -398,7 +400,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> query_backward_backward(
         const at::Tensor& lut_grid_nb2grid_idx,  // (N, 1)
         // dense luts
         const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
-        const at::Tensor& lut_cell_nb2grid_nb,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const std::string& interpolation) {
     const int64_t len = grid_indices.size(0);
@@ -537,7 +539,7 @@ at::Tensor isosurface_extraction(
         const at::Tensor& lut_grid_nb2grid_idx,
         const at::Tensor& cell_coords_table,
         const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, 8)
-        const at::Tensor& lut_cell_nb2grid_nb,  // (M^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr) {
@@ -839,13 +841,13 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
         const at::Tensor& sdfs,     // (num_embeddings, dense_res^3, 1)
         const at::Tensor& weights,  // (num_embeddings, dense_res^3, 1)
 
-        const at::Tensor& grid_indices,              // (N, 1)
-        const at::Tensor& grid_coords_table,         // (N, 3)
+        const at::Tensor& grid_indices,          // (N, 1)
+        const at::Tensor& grid_coords_table,     // (N, 3)
         const at::Tensor& lut_grid_nb2grid_idx,  // (N, 8) [-1 for
-                                                     // invalid neighbors]
-        const at::Tensor& cell_coords_table,         // (dense_res^3, 1)
+                                                 // invalid neighbors]
+        const at::Tensor& cell_coords_table,     // (dense_res^3, 1)
         const at::Tensor& lut_cell_nb2cell_idx,  // (dense_res^3, 8)
-        const at::Tensor& lut_cell_nb2grid_nb,  // (dense_res^3, 8)
+        const at::Tensor& lut_cell_nb2grid_nb,   // (dense_res^3, 8)
         const int64_t grid_dim,
         const float iso_value,
         const float weight_thr) {
@@ -944,12 +946,94 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
 }
 
 // Only provide forward convolution (interpolation) for now
+
+template <typename scalar_t>
+__global__ void convolution_forward_kernel(
+        const scalar_t* __restrict__ inputs,
+        const scalar_t* __restrict__ weights,
+        const bool* __restrict__ masks,
+        const int64_t* __restrict__ grid_indices,
+        const int64_t* __restrict__ cell_indices,
+        const int64_t* __restrict__ lut_grid_nb2grid_idx,
+        const int64_t* __restrict__ lut_cell_nb2cell_idx,
+        const int64_t* __restrict__ lut_cell_nb2grid_nb,
+        scalar_t* outputs,
+        const int64_t num_cell_nbs,
+        const int64_t grid_dim,
+        const int64_t num_cells_per_grid,
+        const int64_t embedding_dims,
+        const int64_t len) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= len || !masks[i]) return;
+
+    int grid_i = i / num_cells_per_grid;
+    int cell_i = i % num_cells_per_grid;
+
+    int grid_idx = grid_indices[grid_i];
+    int cell_idx = cell_indices[cell_i];
+
+    const int64_t* grid_nb2grid_idx =
+            lut_grid_nb2grid_idx + num_cells_per_grid * grid_idx;
+    const int64_t* cell_nb2cell_idx =
+            lut_cell_nb2cell_idx + num_cells_per_grid * cell_idx;
+    const int64_t* cell_nb2grid_nb =
+            lut_cell_nb2grid_nb + num_cells_per_grid * cell_idx;
+
+    auto local_sum_output = MiniVec<scalar_t, 16>::zeros();
+    for (int k = 0; k < num_cell_nbs; ++k) {
+        int grid_nb = cell_nb2grid_nb[k];
+        if (grid_nb < 0) continue;
+
+        int grid_nb_idx = grid_nb2grid_idx[grid_nb];
+        int cell_nb_idx = cell_nb2cell_idx[k];
+
+        const scalar_t* input =
+                inputs + (grid_nb_idx * num_cells_per_grid + cell_nb_idx) *
+                                 embedding_dims;
+        const scalar_t* weight = weights + k * embedding_dims;
+        for (int c = 0; c < embedding_dims; ++c) {
+            // Simplified; general case it would be a matmul
+            local_sum_output[c] += weights[c] * input[c];
+        }
+    }
+    auto output = outputs + i * embedding_dims;
+    for (int c = 0; c < embedding_dims; ++c) {
+        output[c] = local_sum_output[c];
+    }
+}
+
 at::Tensor convolution_forward(
-        const at::Tensor& embeddings,
-        const at::Tensor& weights,                   // (K window)
-        const at::Tensor& grid_indices,              // (N, 1)
-        const at::Tensor& cell_indices,              // (M^3, 8)
+        const at::Tensor& inputs,
+        const at::Tensor& weights,  // (K window)
+        const at::Tensor& masks,
+        const at::Tensor& grid_indices,          // (N, 1)
+        const at::Tensor& cell_indices,          // (M^3, 8)
         const at::Tensor& lut_grid_nb2grid_idx,  // (N, K^3)
         const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, K^3)
-        const at::Tensor& lut_cell_nb2grid_nb,  // (M^3, K^3)
-        const int64_t grid_dim) {}
+        const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, K^3)
+        const int64_t num_cell_nbs,
+        const int64_t grid_dim) {
+    at::Tensor outputs = at::zeros_like(inputs);
+    const int64_t embedding_dims = inputs.size(2);
+    const int64_t num_cells_per_grid = inputs.size(1);
+    const int64_t num_grids = grid_indices.size(0);
+    const int64_t len = num_grids * num_cells_per_grid;
+
+    const int threads = 256;
+    const int blocks = (len + threads - 1) / threads;
+    AT_DISPATCH_FLOATING_TYPES(
+            inputs.scalar_type(), "convolution_forward", [&] {
+                convolution_forward_kernel<scalar_t><<<blocks, threads>>>(
+                        inputs.data_ptr<scalar_t>(),
+                        weights.data_ptr<scalar_t>(), masks.data_ptr<bool>(),
+                        grid_indices.data_ptr<int64_t>(),
+                        cell_indices.data_ptr<int64_t>(),
+                        lut_grid_nb2grid_idx.data_ptr<int64_t>(),
+                        lut_cell_nb2cell_idx.data_ptr<int64_t>(),
+                        lut_cell_nb2grid_nb.data_ptr<int64_t>(),
+                        outputs.data_ptr<scalar_t>(), num_cell_nbs, grid_dim,
+                        num_cells_per_grid, embedding_dims, len);
+            });
+    C10_CUDA_CHECK(cudaGetLastError());
+    return outputs;
+}
