@@ -959,6 +959,7 @@ __global__ void convolution_forward_kernel(
         const int64_t* __restrict__ lut_cell_nb2grid_nb,
         scalar_t* outputs,
         const int64_t num_cell_nbs,
+        const int64_t num_grid_nbs,
         const int64_t grid_dim,
         const int64_t num_cells_per_grid,
         const int64_t embedding_dims,
@@ -973,27 +974,30 @@ __global__ void convolution_forward_kernel(
     int cell_idx = cell_indices[cell_i];
 
     const int64_t* grid_nb2grid_idx =
-            lut_grid_nb2grid_idx + num_cells_per_grid * grid_idx;
+            lut_grid_nb2grid_idx + num_grid_nbs * grid_idx;
     const int64_t* cell_nb2cell_idx =
-            lut_cell_nb2cell_idx + num_cells_per_grid * cell_idx;
+            lut_cell_nb2cell_idx + num_cell_nbs * cell_idx;
     const int64_t* cell_nb2grid_nb =
-            lut_cell_nb2grid_nb + num_cells_per_grid * cell_idx;
+            lut_cell_nb2grid_nb + num_cell_nbs * cell_idx;
 
     auto local_sum_output = MiniVec<scalar_t, 16>::zeros();
     for (int k = 0; k < num_cell_nbs; ++k) {
         int grid_nb = cell_nb2grid_nb[k];
-        if (grid_nb < 0) continue;
-
         int grid_nb_idx = grid_nb2grid_idx[grid_nb];
-        int cell_nb_idx = cell_nb2cell_idx[k];
+        if (grid_nb_idx < 0) continue;
 
+        int cell_nb_idx = cell_nb2cell_idx[k];
+        // printf("k: %d, grid_idx: %d, cell_idx: %d, grid_nb=%d,
+        // grid_nb_idx=%d, "
+        //        "cell_nb_idx=%d\n",
+        //        k, grid_idx, cell_idx, grid_nb, grid_nb_idx, cell_nb_idx);
         const scalar_t* input =
                 inputs + (grid_nb_idx * num_cells_per_grid + cell_nb_idx) *
                                  embedding_dims;
         const scalar_t* weight = weights + k * embedding_dims;
         for (int c = 0; c < embedding_dims; ++c) {
             // Simplified; general case it would be a matmul
-            local_sum_output[c] += weights[c] * input[c];
+            local_sum_output[c] += input[c] * weight[c];
         }
     }
     auto output = outputs + i * embedding_dims;
@@ -1011,16 +1015,36 @@ at::Tensor convolution_forward(
         const at::Tensor& lut_grid_nb2grid_idx,  // (N, K^3)
         const at::Tensor& lut_cell_nb2cell_idx,  // (M^3, K^3)
         const at::Tensor& lut_cell_nb2grid_nb,   // (M^3, K^3)
-        const int64_t num_cell_nbs,
         const int64_t grid_dim) {
     at::Tensor outputs = at::zeros_like(inputs);
     const int64_t embedding_dims = inputs.size(2);
+
+    const int64_t num_grid_nbs = lut_grid_nb2grid_idx.size(1);
+    const int64_t num_cell_nbs = lut_cell_nb2cell_idx.size(1);
     const int64_t num_cells_per_grid = inputs.size(1);
     const int64_t num_grids = grid_indices.size(0);
     const int64_t len = num_grids * num_cells_per_grid;
 
     const int threads = 256;
     const int blocks = (len + threads - 1) / threads;
+    std::cout << "input size: " << inputs.sizes() << std::endl;
+    std::cout << "weights size: " << weights.sizes() << std::endl;
+    std::cout << "masks size: " << masks.sizes() << std::endl;
+    std::cout << "grid_indices size: " << grid_indices.sizes() << std::endl;
+    std::cout << "cell_indices size: " << cell_indices.sizes() << std::endl;
+    std::cout << "lut_grid_nb2grid_idx size: " << lut_grid_nb2grid_idx.sizes()
+              << std::endl;
+    std::cout << "lut_cell_nb2cell_idx size: " << lut_cell_nb2cell_idx.sizes()
+              << std::endl;
+    std::cout << "lut_cell_nb2grid_nb size: " << lut_cell_nb2grid_nb.sizes()
+              << std::endl;
+    std::cout << "outputs size: " << outputs.sizes() << std::endl;
+    std::cout << "num_cell_nbs: " << num_cell_nbs << std::endl;
+    std::cout << "num_grid_nbs: " << num_grid_nbs << std::endl;
+    std::cout << "grid_dim: " << grid_dim << std::endl;
+    std::cout << "num_cells_per_grid: " << num_cells_per_grid << std::endl;
+    std::cout << "embedding_dims: " << embedding_dims << std::endl;
+    std::cout << "len: " << len << std::endl;
     AT_DISPATCH_FLOATING_TYPES(
             inputs.scalar_type(), "convolution_forward", [&] {
                 convolution_forward_kernel<scalar_t><<<blocks, threads>>>(
@@ -1031,8 +1055,9 @@ at::Tensor convolution_forward(
                         lut_grid_nb2grid_idx.data_ptr<int64_t>(),
                         lut_cell_nb2cell_idx.data_ptr<int64_t>(),
                         lut_cell_nb2grid_nb.data_ptr<int64_t>(),
-                        outputs.data_ptr<scalar_t>(), num_cell_nbs, grid_dim,
-                        num_cells_per_grid, embedding_dims, len);
+                        outputs.data_ptr<scalar_t>(), num_cell_nbs,
+                        num_grid_nbs, grid_dim, num_cells_per_grid,
+                        embedding_dims, len);
             });
     C10_CUDA_CHECK(cudaGetLastError());
     return outputs;

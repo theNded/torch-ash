@@ -361,4 +361,20 @@ if __name__ == "__main__":
         iso_value=0.0,
         weight_thr=0.5,
     )
-    o3d.visualization.draw([mesh, lineset, sample_pcd, bbox_lineset])
+    #o3d.visualization.draw([mesh, lineset, sample_pcd, bbox_lineset])
+
+    fuser.grid.gaussian_filter_(7, 0.1)
+
+    sdf = fuser.grid.embeddings[..., 0].contiguous()
+    weight = fuser.grid.embeddings[..., 4].contiguous()
+    mesh_filtered = fuser.grid.marching_cubes(
+        sdf,
+        weight,
+        vertices_only=False,
+        color_fn=color_fn,
+        normal_fn=normal_fn,
+        iso_value=0.0,
+        weight_thr=0.5,
+    )
+    o3d.visualization.draw([mesh, mesh_filtered])
+

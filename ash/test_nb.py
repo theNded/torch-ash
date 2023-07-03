@@ -45,8 +45,8 @@ def enumerate_neighbor_coord_offsets(
 
     return idx2offset, fn_offset2idx
 
-idx2offset, fn_offset2idx = enumerate_neighbor_coord_offsets(3, 1, False)
-indices = torch.randint(len(idx2offset), (8,))
+idx2offset, fn_offset2idx = enumerate_neighbor_coord_offsets(3, 3, True)
+indices = torch.arange(0, 343)
 print(indices)
 print(idx2offset[indices])
 print(fn_offset2idx(idx2offset[indices]))

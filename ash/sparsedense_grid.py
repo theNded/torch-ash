@@ -522,7 +522,9 @@ class SparseDenseGrid(ASHModule):
 
         cell_nb_coords = cell_nb_coords.view(-1, self.in_dim)
 
-        grid_nb_offsets = (cell_nb_coords // self.grid_dim).long()
+        grid_nb_offsets = torch.div(
+            cell_nb_coords, self.grid_dim, rounding_mode="floor"
+        ).long()
         cell_nb_coords = torch.remainder(cell_nb_coords, self.grid_dim)
         cell_nb_indices = self._linearize_cell_coords(cell_nb_coords)
 
@@ -855,7 +857,8 @@ class SparseDenseGrid(ASHModule):
         """
         pass
 
-    def gaussian_filter(self, size, sigma):
+    @torch.no_grad()
+    def gaussian_filter_(self, size, sigma):
         """Gaussian filter.
         Args:
             radius: radius of the filter
@@ -866,6 +869,7 @@ class SparseDenseGrid(ASHModule):
         assert size % 2 == 1, "size must be odd"
 
         import scipy.stats as st
+        import numpy as np
 
         def gkern(size, nsig, dim=2):
             x = np.linspace(-nsig, nsig, size + 1)
@@ -890,32 +894,32 @@ class SparseDenseGrid(ASHModule):
             .view(size, size, size, 1)
             .repeat(1, 1, 1, embedding_dim)
         )
+        weights = weights.to(self.embeddings.device)
 
-        output = self.convolution(self.embeddings, weights)
-        return output
+        self.embeddings.copy_(self.convolution(self.embeddings, weights))
 
     def convolution(self, inputs, weights):
         # inputs: (num_embeddings, num_cells_per_grid, in_dim)
         # Input shape check -- need to be the same as the grid structure
-        assert inputs.iscontiguous()
+        assert inputs.is_contiguous()
         assert inputs.shape[:2] == self.embeddings.shape[:2]
 
         # weights: (2R+1, 2R+1, 2R+1, in_dim, output_dim)
         # Weight shape check
-        assert weights.iscontiguous()
-        assert len(weights.shape) == 5
+        assert weights.is_contiguous()
+        assert len(weights.shape) == 4
         assert weights.shape[0] % 2 == 1
         radius = weights.shape[0] // 2
         for d in range(3):
             assert weights.shape[d] == 2 * radius + 1
         assert weights.shape[3] == inputs.shape[-1]
+        assert weights.device == inputs.device
 
         (
             conv_lut_cell_nb2grid_nb,
             conv_lut_cell_nb2cell_idx,
         ) = self.construct_cell_neighbor_lut(radius, bidirectional=True)
 
-        num_cell_nbs = conv_lut_cell_nb2grid_nb.shape[1]
 
         grid_radius = (radius + self.grid_dim - 1) // self.grid_dim
         conv_grid_coords, conv_lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
@@ -923,18 +927,26 @@ class SparseDenseGrid(ASHModule):
         )
 
         grid_coords, cell_coords, grid_indices, cell_indices = self.items()
+        # import ipdb
 
-        weights = weights.view(num_cell_nbs, *weights.shape[-2:])
+        # ipdb.set_trace()
+
+        num_cell_nbs = conv_lut_cell_nb2grid_nb.shape[1]
+        weights = weights.view(num_cell_nbs, weights.shape[-1])
+        print(weights)
+        print(weights.is_contiguous())
+        print(weights.dtype)
+        print(weights.shape)
+        print(weights.device)
         output = backend.convolution_forward(
             inputs,
             weights,
-            torch.zeros_like(inputs),
+            torch.ones_like(inputs, dtype=bool),
             grid_indices,
             cell_indices,
             conv_lut_grid_nb2grid_idx,
             conv_lut_cell_nb2cell_idx,
             conv_lut_cell_nb2grid_nb,
-            num_cell_nbs,
             self.grid_dim,
         )
 
