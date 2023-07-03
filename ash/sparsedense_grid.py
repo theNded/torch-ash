@@ -892,11 +892,13 @@ class SparseDenseGrid(ASHModule):
         weights = (
             gkern(size, sigma, dim=3)
             .view(size, size, size, 1)
-            .repeat(1, 1, 1, embedding_dim)
+            .repeat(1, 1, 1, 3)
         )
         weights = weights.to(self.embeddings.device)
 
-        self.embeddings.copy_(self.convolution(self.embeddings, weights))
+        self.embeddings[..., 1:4].copy_(
+            self.convolution(self.embeddings[..., 1:4].contiguous(), weights)
+        )
 
     def convolution(self, inputs, weights):
         # inputs: (num_embeddings, num_cells_per_grid, in_dim)
@@ -920,16 +922,15 @@ class SparseDenseGrid(ASHModule):
             conv_lut_cell_nb2cell_idx,
         ) = self.construct_cell_neighbor_lut(radius, bidirectional=True)
 
-
         grid_radius = (radius + self.grid_dim - 1) // self.grid_dim
         conv_grid_coords, conv_lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
             grid_radius, bidirectional=True
         )
 
         grid_coords, cell_coords, grid_indices, cell_indices = self.items()
-        # import ipdb
+        import ipdb
 
-        # ipdb.set_trace()
+        ipdb.set_trace()
 
         num_cell_nbs = conv_lut_cell_nb2grid_nb.shape[1]
         weights = weights.view(num_cell_nbs, weights.shape[-1])

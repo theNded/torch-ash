@@ -1000,7 +1000,8 @@ __global__ void convolution_forward_kernel(
             local_sum_output[c] += input[c] * weight[c];
         }
     }
-    auto output = outputs + i * embedding_dims;
+    auto output = outputs +
+                  (grid_idx * num_cells_per_grid + cell_idx) * embedding_dims;
     for (int c = 0; c < embedding_dims; ++c) {
         output[c] = local_sum_output[c];
     }
