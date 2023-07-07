@@ -31,5 +31,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "Isosurface extraction");
     m.def("marching_cubes", &marching_cubes, "Marching cubes");
 
+    m.def("convolution_forward", &convolution_forward, "Convolution forward");
+
     m.def("ray_sample", &ray_sample, "Ray sample");
 }

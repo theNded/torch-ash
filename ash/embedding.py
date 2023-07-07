@@ -17,7 +17,7 @@ class HashEmbedding(ASHModule):
         in_dim: int,
         num_embeddings: int,
         embedding_dim: int,
-        device: Optional[Union[str, torch.device]] = "cpu",
+        device: Union[str, torch.device] = "cpu",
     ):
         super().__init__()
         self.embedding = nn.Parameter(
