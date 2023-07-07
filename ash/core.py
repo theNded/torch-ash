@@ -90,7 +90,7 @@ class ASHEngine(nn.Module):
         self.register_load_state_dict_post_hook(self._post_load_state_dict_hook)
 
     def state_dict(
-        self, destination=None, prefix="", keep_vars=False
+        self, destination=None, prefix: str = "", keep_vars: bool = False
     ) -> "OrderedDict[str, torch.Tensor]":
         """Override state_dict to obtain active keys and indices into the backend.
         Args:
@@ -347,6 +347,7 @@ class ASHEngine(nn.Module):
 class ASHModule(nn.Module):
     """
     Helper virtual class to handle engine's 'to' operations
+    Inherited by HashEmbedding, HashMap, and HashSet
     """
 
     def __init__(self):
@@ -354,8 +355,8 @@ class ASHModule(nn.Module):
         self.engine = None
 
     def to(self, device):
-        assert self.engine is not None
-        module = super(HashEmbedder, self).to(device)
+        assert self.engine is not None, "engine is not initialized"
+        module = super(ASHModule, self).to(device)
         module.engine = module.engine.to(device)
         return module
 

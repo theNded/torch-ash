@@ -29,7 +29,10 @@ class HashEmbedding(ASHModule):
         self.engine.insert_keys(keys)
 
     def forward(self, keys: torch.Tensor) -> torch.Tensor:
+        """
+        Returns stored embeddings for inserted keys,
+        Returns zero for unfound keys
+        """
         indices, masks = self.engine.find(keys)
 
-        # return 0 for not-found keys
         return self.embedding[indices] * masks.unsqueeze(-1)

@@ -42,7 +42,7 @@ class HashMap(ASHModule):
         self,
         keys: torch.Tensor,
         values: Union[torch.Tensor, List[torch.Tensor], Dict[str, torch.Tensor]],
-    ) -> torch.Tensor:
+    ):
         if isinstance(values, torch.Tensor):
             assert isinstance(self.value_dims, int)
             values = {"default": values}
@@ -55,7 +55,7 @@ class HashMap(ASHModule):
             assert isinstance(self.value_dims, dict)
             self.engine.insert(keys, values, self.values)
         else:
-            raise ValueError("values must be Tensor, list or dict")
+            raise ValueError("values must be Tensor, list, or dict")
 
     def reinterpret_value_dict(
         self, values: Dict[str, torch.Tensor]
@@ -67,7 +67,7 @@ class HashMap(ASHModule):
         elif isinstance(self.value_dims, dict):
             return values
         else:
-            raise ValueError("values must be Tensor, list or dict")
+            raise ValueError("values must be Tensor, list, or dict")
 
     def find(
         self,
