@@ -2,7 +2,7 @@
 
 #include "mc_macros.h"
 #include "minivec.h"
-#include "sparsedense_grid.h"
+#include "grid.h"
 
 template <typename scalar_t>
 class SmoothStepFunctor {

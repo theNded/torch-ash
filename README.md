@@ -16,6 +16,16 @@ torch-ash is the missing piece of collision-free extendable parallel spatial has
   year={2023},
 }
 ```
+<table>
+  <tr>
+  <td><img src="https://github.com/theNded/theNded.github.io/blob/master/assets/images/ash-mono/0050.gif" width="480"/></td>
+  <td><img src="https://github.com/theNded/theNded.github.io/blob/master/assets/images/ash-mono/lounge.gif" width="480"/></td>
+  </tr>
+</table>
+
+
+Note for a more user-friendly interface and further extensions, I have fully rewritten everything from scratch in this repo. Discrepancies from the reported results in the aforementioned papers are expected. More examples will come. 
+
 
 ## Install
 cmake is required in the conda environment.
@@ -23,66 +33,88 @@ cmake is required in the conda environment.
 pip install . --verbose
 ```
 
-## Basics
-- The core is ASHEngine, which implements a hash map from coordinates (`torch.IntTensor`) to indices (`torch.LongTensor`).
-- Above ASHEngine, there are `HashSet` and `HashMap` which are wrappers around ASHEngine. A `HashSet` maps a coordinate to a boolean value, usually used for the `unique` operation. A `HashMap` maps a coordinate to a (dictionary) of values, allows fast insertion and accessing coordinate-value pairs.
+## Engine (ASH)
+- The core is `ASHEngine`, a pytorch module implementing a parallel, collision-free, dynamic hash map from coordinates (`torch.IntTensor`) to indices (`torch.LongTensor`). It depends on [stdgpu](https://github.com/stotko/stdgpu).
+- Above `ASHEngine`, there are `HashSet` and `HashMap` which are wrappers around ASHEngine. A `HashSet` maps a coordinate to a boolean value, usually used for the `unique` operation. A `HashMap` maps a coordinate to a (dictionary) of values, allows fast insertion and accessing coordinate-value pairs.
 - Similar to `HashMap`, `HashEmbedding` maps coordinates to embeddings that is akin to `torch.nn.Embedding`.
 
-## SparseDenseGrids
-`SparseDenseGrid` is the engine for direct/neural reconstruction. It consists of sparse arrays of grids and dense arrays of cells. The idea is similar to instant-ngp, but true sparsity is achieved through spatial initialization and the collision-free hashing. 
-
-It has two wrappers for coordinate transform, `UnboundedSparseDenseGrid` for potentially dynamically increasing metric scenes, and `BoundedSparseDenseGrid` for scenes bounded in unit cubes. Trilinear interpolation and double backwards are implemented to support differentiable gradient computation.
-
-The general pattern for using the grid is:
+### Usage
+---
 ```python
-grid = UboundedSparseDenseGrid(in_dim=3, 
+hashmap = HashMap(key_dim=3, value_dims={"color": 3, "depth": 1}, capacity=100, device=torch.device("cuda:0"))
+
+# To insert
+keys = (torch.rand(10, 3) * 100).int().cuda()
+values = {"colors": torch.rand(10, 3).float().cuda(), "depth": torch.rand(10, 1).float().cuda()}
+hashmap.insert(keys, values)
+
+# To query
+query_keys = (torch.rand(10, 3) * 100).int().cuda()
+indices, masks = hashmap.find(query_keys)
+
+# To enumerate
+all_indices, all_values = hashmap.items(return_indices=True, return_values=True)
+```
+
+## SparseDenseGrids (Fast Monocular Scene Reconstruction)
+`SparseDenseGrid` is the engine for direct/neural scene representation. It consists of sparse arrays of grids and dense arrays of cells. The idea is similar to [Instant-NGP](https://github.com/NVlabs/instant-ngp) and [Plenoxels](https://github.com/sxyu/svox2), but precise sparsity is achieved through spatial initialization and collision-free hashing. Essentially it is a modern version of [VoxelHashing](https://github.com/niessner/VoxelHashing).
+
+It has two wrappers for coordinate transform, `UnboundedSparseDenseGrid` for potentially dynamically increasing metric scenes, and `BoundedSparseDenseGrid` for scenes bounded in unit cubes. Trilinear interpolation and double backwards are implemented to support differentiable gradient computation. All these modules can be converted to and from state dicts by serializing the underlying hash map.
+
+The `SparseDenseGrid` does a good job without an MLP in fast reconstruction tasks (e.g. RGB-D fusion, differentiable volume rendering with a decent initialization), but with an MLP, there seems no advantages in comparison to Instant-NGP as of now. Potential extensions in this line are still in progress.
+
+### Usage
+---
+#### Allocation
+We first initialize a 3D sparse-dense grid with 10000 sparse grid blocks. Each sparse grid contains a dense 8^3=512 array of cells, whose size is 0.01m.
+```python
+grid = UboundedSparseDenseGrid(in_dim=3,
                                num_embeddings=10000,
-                               grid_dim=16, 
-                               embedding_dims=8, 
+                               grid_dim=16,
+                               embedding_dims=8,
                                cell_size=0.01)
+```
 
-# Initialize grids by insertion 
-for points in list_points:
-    with torch.no_grad():
-        grid_coords, cell_coords, grid_indices, cell_indices = grid.spatial_init_(points)
-        
-        # [Optional] direct assignment
-        cell_points = grid.cell_to_world(grid_coords, cell_coords)
-        estimate = estimate_fn(cell_points)
-        grid.embeddings[grid_indices, cell_indices] = estimate
+#### Initialization
+We then spatially initialize the grid at input points (e.g. obtained point cloud, RGB-D scans). This results in coordinates and indices that supports index-based access.
+```python
+with torch.no_grad():
+    grid_coords, cell_coords, grid_indices, cell_indices = grid.spatial_init_(points)
 
+    # [Optional] direct assignment
+    grid.embeddings[grid_indices, cell_indices] = attributes
+```
 
-# Optimize via auto-differentiation
+#### Optimization
+As a pytorch extension, first and second order autodiff are enabled by differentiable query.
+```python
 optim = torch.optim.SGD(grid.parameters(), lr=1e-3)
 for x, gt in batch:
     optim.zero_grad()
     x.requires_grad_(True)
     embedding, mask = grid(x, interpolation="linear")
 
-    output = geometry_mlp(embedding, mask)
-    sdf, geo_features = torch.split(output, 1)
-    rgb = color_mlp(positional_encoding(x), geo_features)
+    output = forward_fn(embedding, mask)
 
-    dsdf_dposition = torch.autograd.grad(
-        outputs=sdf, 
+    doutput_dx = torch.autograd.grad(
+        outputs=output,
         inputs=x,
-        grad_outputs=torch.ones_like(sdf, requires_grad=False),
+        grad_outputs=torch.ones_like(output, requires_grad=False),
         create_graph=True,
         retain_graph=True)[0]
 
-    eikonal_loss = ((torch.norm(dsdf_dposition, dim=-1) - 1)**2).mean()
-    data_loss = loss_fn(sdf, rgb, gt)
-    (eikonal_loss + data_loss).backward()
+    (loss_fn(output) + grad_loss_fn(doutput_dx)).backward()
     optim.step()
 ```
 
-All these modules can be converted to and from state dicts by serializing the underlying hash map.
 
-## MultiResSparseDenseGrids
-TBD: a naive implementation would be simply maintaining `L` `SparseDenseGrid`s. If it has severe efficiency issues, optimize kernels accordingly.
 
-## Experiments
-- `SparseDenseGrids` with point clouds.
-- `SparseDenseGrids` with RGB + monocular depth.
-- `SparseDenseGrids` with RGB + monocular depth + point clouds.
-- Elevate to `MultiResSparseDenseGrids` if results are problematic.
+## Milestones
+- [x] Initial release
+- [x] Demo: RGB-D SDF fusion
+- [x] Demo: Neural SDF reconstruction from monocular images (no MLP)
+- [ ] Demo: Neural SDF reconstruction from monocular images (MLP)
+- [ ] Demo: LiDAR SDF fusion
+- [ ] Demo: Neural SDF reconstruction from point clouds
+- [ ] Documentation page
+- [ ] CPU counterpart

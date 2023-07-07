@@ -71,7 +71,7 @@ try:
                 "ash/src/hashmap_gpu.cu",
                 "ash/src/hashmap_cpu.cpp",
                 "ash/src/sampler.cu",
-                "ash/src/sparsedense_grid.cu"
+                "ash/src/grid.cu"
             ],
             include_dirs=include_dirs,
             library_dirs=library_dirs,

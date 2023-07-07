@@ -1,7 +1,7 @@
 
 import torch
 
-from .sparsedense_grid import SparseDenseGrid
+from .grid import SparseDenseGrid
 
 
 def marching_cubes(

@@ -3,7 +3,7 @@ from .common import DotDict
 from .core import ASHEngine, ASHModule
 from .hashmap import HashMap, HashSet
 from .embedding import HashEmbedding
-from .sparsedense_grid import (
+from .grid import (
     enumerate_neighbor_coord_offsets,
     SparseDenseGridQuery,
     SparseDenseGridQueryBackward,
