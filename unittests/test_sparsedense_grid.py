@@ -1,17 +1,12 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from tqdm import tqdm
-import os
 from ash import (
     SparseDenseGrid,
     SparseDenseGridQuery,
     SparseDenseGridQueryBackward,
-    BoundedSparseDenseGrid,
     SirenNet,
 )
-import pytest
 
 np.random.seed(15213)
 torch.manual_seed(15213)

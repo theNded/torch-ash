@@ -1,7 +1,5 @@
 import torch
-import os
-from ash import HashSet, HashMap
-import pytest
+from ash import HashSet
 
 
 class TestHashSet:

@@ -1,19 +1,15 @@
 from typing import (
-    List,
     Union,
     Tuple,
-    Dict,
-    OrderedDict,
     Optional,
     Literal,
-    overload,
     Callable,
 )
 
 import torch
 import torch.nn as nn
 from .core import ASHEngine, ASHModule
-from .hashmap import HashMap, HashSet
+from .hashmap import HashSet
 
 from .common import _get_c_extension
 
@@ -785,7 +781,6 @@ class SparseDenseGrid(ASHModule):
             rays_far: (N, 1) tensor of ray far range
             dilation: dilation factor per cell along the ray
         """
-        pass
 
     # Sampling
     @torch.no_grad()
@@ -855,7 +850,6 @@ class SparseDenseGrid(ASHModule):
         Returns:
             samples: (num_samples, in_dim) tensor of samples
         """
-        pass
 
     @torch.no_grad()
     def gaussian_filter_(self, size, sigma):

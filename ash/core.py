@@ -1,7 +1,6 @@
-from typing import List, Union, Tuple, Dict, OrderedDict, Optional, Literal, overload
+from typing import Union, Tuple, Dict, OrderedDict, Optional
 
 from collections import OrderedDict
-import logging
 import warnings
 
 import torch

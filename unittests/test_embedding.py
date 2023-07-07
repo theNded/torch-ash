@@ -1,10 +1,6 @@
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from tqdm import tqdm
-import os
 from ash import HashEmbedding
-import pytest
 
 
 class TestEmbedding:
