@@ -219,7 +219,7 @@ class TestSparseDenseGrid:
             embedding_dim + 3, dim_hidden=128, dim_out=1, num_layers=2, w0=30.0
         ).cuda()
 
-        grid.construct_sparse_neighbor_tables_()
+        grid.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
 
         def grad_x_fn(x_input):
             x_input.requires_grad_(True)
@@ -256,7 +256,7 @@ class TestSparseDenseGrid:
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
 
-            grid.construct_sparse_neighbor_tables_()
+            grid.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
 
             output = SparseDenseGridQuery.apply(
                 embeddings,
@@ -279,7 +279,6 @@ class TestSparseDenseGrid:
             atol=1e-2,
             rtol=1e-2,
         )
-
 
     def _backward_backward_block(self, in_dim, embedding_dim, grid_dim):
         grid = SparseDenseGrid(
@@ -321,7 +320,7 @@ class TestSparseDenseGrid:
 
             grid_indices, cell_indices, offsets, masks = grid.query(x)
             assert masks.all()
-            grid.construct_sparse_neighbor_tables_()
+            grid.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
 
             grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
                 z,

@@ -526,8 +526,8 @@ class SparseDenseGrid(ASHModule):
 
         grid_nbs = grid_coord_fn_offset2idx(grid_nb_offsets)
 
-        lut_cell_nb2grid_nb = grid_nbs.view(self.num_cells_per_grid, -1, 1)
-        lut_cell_nb2cell_idx = cell_nb_indices.view(self.num_cells_per_grid, -1, 1)
+        lut_cell_nb2grid_nb = grid_nbs.view(self.num_cells_per_grid, -1)
+        lut_cell_nb2cell_idx = cell_nb_indices.view(self.num_cells_per_grid, -1)
 
         return lut_cell_nb2grid_nb, lut_cell_nb2cell_idx
 
