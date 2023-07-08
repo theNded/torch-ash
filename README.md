@@ -25,7 +25,7 @@ torch-ash is the missing piece of collision-free extendable parallel spatial has
 </table>
 
 
-Note for a more user-friendly interface and further extensions, I have fully rewritten everything from scratch in this repo. Discrepancies from the reported results in the aforementioned papers are expected. More examples will come. 
+Note for a more user-friendly interface and further extensions, I have fully rewritten everything from scratch in this repo. Discrepancies from the reported results in the aforementioned papers are expected. Updates and more examples will come. 
 
 
 ## Install
