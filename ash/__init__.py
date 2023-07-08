@@ -4,13 +4,11 @@ from .core import ASHEngine, ASHModule
 from .hashmap import HashMap, HashSet
 from .embedding import HashEmbedding
 from .grid import (
-    enumerate_neighbor_coord_offsets,
-    SparseDenseGridQuery,
-    SparseDenseGridQueryBackward,
     SparseDenseGrid,
     BoundedSparseDenseGrid,
     UnBoundedSparseDenseGrid,
 )
-from .marching_cubes import marching_cubes
+from .grid_query import SparseDenseGridQuery, SparseDenseGridQueryBackward
+from .grid_nns import enumerate_neighbor_coord_offsets
 
 from .mlp import SirenLayer, SirenNet, MLP

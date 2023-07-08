@@ -1,7 +1,6 @@
 from typing import Literal
 
 import torch
-import torch.nn as nn
 
 from .common import _get_c_extension
 

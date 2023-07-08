@@ -3,13 +3,12 @@ from typing import (
     Tuple,
     Optional,
     Literal,
-    Callable,
 )
 
 import torch
 import torch.nn as nn
 
-from .grid_query import SparseDenseGridQuery, SparseDenseGridQueryBackward
+from .grid_query import SparseDenseGridQuery
 from .grid_nns import enumerate_neighbor_coord_offsets
 
 from .core import ASHEngine, ASHModule
@@ -19,6 +18,12 @@ from .common import _get_c_extension
 
 backend = _get_c_extension()
 
+"""
+General dtype rules:
+- coords in world: float
+- coords in cells: int
+- indices: long
+"""
 
 class SparseDenseGrid(ASHModule):
     """
@@ -174,7 +179,9 @@ class SparseDenseGrid(ASHModule):
     ###
     # Core sparse-dense query and enumeration
     ###
-    def query(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def query(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns:
         grid_indices: (N, 1) tensor of sparse grid indices
         cell_indices: (N, 1) tensor of dense grid indices
@@ -203,10 +210,8 @@ class SparseDenseGrid(ASHModule):
             masks: (N, 1) tensor of masks
         """
         x = self.transform_world_to_cell(x)
-        # print(x.min(), x.max())
 
         grid_indices, cell_indices, offsets, masks = self.query(x)
-        # print(grid_indices, cell_indices, offsets, masks)
 
         if interpolation == "nearest":
             return self.embeddings[grid_indices, cell_indices], masks
@@ -386,7 +391,7 @@ class SparseDenseGrid(ASHModule):
     # Convolution/filter for sparse-dense structure
     ###
     @torch.no_grad()
-    def gaussian_filter_(self, size, sigma):
+    def gaussian_filter_(self, size: int, sigma: float) -> None:
         """Gaussian filter.
         Args:
             radius: radius of the filter
@@ -426,7 +431,7 @@ class SparseDenseGrid(ASHModule):
 
         self.embeddings.copy_(self.convolution(self.embeddings, weights))
 
-    def convolution(self, inputs, weights):
+    def convolution(self, inputs: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         # inputs: (num_embeddings, num_cells_per_grid, in_dim)
         # Input shape check -- need to be the same as the grid structure
         assert inputs.is_contiguous()
@@ -477,7 +482,7 @@ class SparseDenseGrid(ASHModule):
     ###
     @torch.no_grad()
     def construct_cell_neighbor_lut(
-        self, radius, bidirectional
+        self, radius: int, bidirectional: bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         (
             cell_coord_offsets,
@@ -518,7 +523,7 @@ class SparseDenseGrid(ASHModule):
 
     @torch.no_grad()
     def construct_grid_neighbor_lut(
-        self, radius, bidirectional
+        self, radius: int, bidirectional: bool
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Construct a neighbor lookup table for the sparse-dense grid.
         This should only be called once the sparse grid is initialized.
@@ -570,7 +575,7 @@ class SparseDenseGrid(ASHModule):
         return grid_coords, lut_grid_nb2grid_idx
 
     @torch.no_grad()
-    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
+    def construct_grid_neighbor_lut_(self, radius: int, bidirectional: bool) -> None:
         self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
             radius, bidirectional
         )
@@ -723,7 +728,7 @@ class UnBoundedSparseDenseGrid(SparseDenseGrid):
         self.bbox_max = self.transform_cell_to_world(self.bbox_max[0] * self.grid_dim)
 
     @torch.no_grad()
-    def get_bbox(self, force_recompute=False):
+    def get_bbox(self, force_recompute: bool = False):
         if self.bbox_min is None or self.bbox_max is None or force_recompute:
             self.compute_bbox_()
         return self.bbox_min, self.bbox_max

@@ -1,7 +1,6 @@
 from typing import Tuple, Callable
 
 import torch
-import numpy as np
 
 def enumerate_neighbor_coord_offsets(
     dim: int, radius: int, bidirectional: bool, device: torch.device

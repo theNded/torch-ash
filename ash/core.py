@@ -134,7 +134,7 @@ class ASHEngine(nn.Module):
 
         self.backend.load_states(backend_state_dict)
 
-    def _key_check(self, keys) -> None:
+    def _key_check(self, keys: torch.Tensor) -> None:
         """Check keys shape and dtype.
         Args:
             keys: keys to check for insert, find, erase
@@ -144,7 +144,9 @@ class ASHEngine(nn.Module):
         if keys.dtype != torch.int32:
             warnings.warn("keys are not int32, conversion might reduce precision.")
 
-    def _value_check(self, values, external_values) -> None:
+    def _value_check(
+        self, values: Dict[str, torch.Tensor], external_values: Dict[str, torch.Tensor]
+    ) -> None:
         """Check values shape and dtype.
         Check if insertions and external_values are consistent.
         Args:
