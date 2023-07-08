@@ -1,8 +1,10 @@
+from typing import Tuple, Callable
+
 import torch
 
 def enumerate_neighbor_coord_offsets(
-    dim: int, radius: int, bidirectional: bool
-) -> torch.Tensor:
+    dim: int, radius: int, bidirectional: bool, device: torch.device
+) -> Tuple[torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
     """Generate neighbor coordinate offsets.
     This function is independent of the choice of grid or cell.
     In the 1-radius, non-bidirectional case, it is equivalent to morton code
@@ -18,9 +20,9 @@ def enumerate_neighbor_coord_offsets(
           returns a tensor of shape ((radius + 1) ** dim, dim)
     """
     if bidirectional:
-        arange = torch.arange(-radius, radius + 1)
+        arange = torch.arange(-radius, radius + 1, device=device)
     else:
-        arange = torch.arange(0, radius + 1)
+        arange = torch.arange(0, radius + 1, device=device)
 
     idx2offset = (
         torch.stack(torch.meshgrid(*[arange for _ in range(dim)], indexing="ij"))
@@ -29,13 +31,12 @@ def enumerate_neighbor_coord_offsets(
         .contiguous()
     )
 
-    def fn_offset2idx(offset):
+    def fn_offset2idx(offset: torch.Tensor) -> torch.Tensor:
         """
         offset: (N, 3)
         returns idx: (N, 1)
         """
         assert len(offset.shape) == 2
-
         padding = radius if bidirectional else 0
         window = 2 * radius + 1 if bidirectional else radius + 1
         idx = torch.zeros_like(offset[:, 0])
@@ -44,9 +45,3 @@ def enumerate_neighbor_coord_offsets(
         return idx
 
     return idx2offset, fn_offset2idx
-
-idx2offset, fn_offset2idx = enumerate_neighbor_coord_offsets(3, 3, True)
-indices = torch.arange(0, 343)
-print(indices)
-print(idx2offset[indices])
-print(fn_offset2idx(idx2offset[indices]))

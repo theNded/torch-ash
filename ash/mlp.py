@@ -31,6 +31,7 @@ import torch.nn.functional as F
 from einops import rearrange
 import numpy as np
 
+
 def exists(val):
     return val is not None
 

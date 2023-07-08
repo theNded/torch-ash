@@ -1,4 +1,4 @@
-from typing import Union, Literal
+from typing import Literal
 import numpy as np
 
 import torch

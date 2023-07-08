@@ -1,7 +1,5 @@
 import torch
-import os
 from ash import HashMap
-import pytest
 
 
 class TestMap:

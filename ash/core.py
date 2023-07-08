@@ -1,7 +1,6 @@
-from typing import List, Union, Tuple, Dict, OrderedDict, Optional, Literal, overload
+from typing import Union, Tuple, Dict, OrderedDict, Optional
 
 from collections import OrderedDict
-import logging
 import warnings
 
 import torch
@@ -91,7 +90,7 @@ class ASHEngine(nn.Module):
         self.register_load_state_dict_post_hook(self._post_load_state_dict_hook)
 
     def state_dict(
-        self, destination=None, prefix="", keep_vars=False
+        self, destination=None, prefix: str = "", keep_vars: bool = False
     ) -> "OrderedDict[str, torch.Tensor]":
         """Override state_dict to obtain active keys and indices into the backend.
         Args:
@@ -135,7 +134,7 @@ class ASHEngine(nn.Module):
 
         self.backend.load_states(backend_state_dict)
 
-    def _key_check(self, keys) -> None:
+    def _key_check(self, keys: torch.Tensor) -> None:
         """Check keys shape and dtype.
         Args:
             keys: keys to check for insert, find, erase
@@ -145,7 +144,9 @@ class ASHEngine(nn.Module):
         if keys.dtype != torch.int32:
             warnings.warn("keys are not int32, conversion might reduce precision.")
 
-    def _value_check(self, values, external_values) -> None:
+    def _value_check(
+        self, values: Dict[str, torch.Tensor], external_values: Dict[str, torch.Tensor]
+    ) -> None:
         """Check values shape and dtype.
         Check if insertions and external_values are consistent.
         Args:
@@ -348,6 +349,7 @@ class ASHEngine(nn.Module):
 class ASHModule(nn.Module):
     """
     Helper virtual class to handle engine's 'to' operations
+    Inherited by HashEmbedding, HashMap, and HashSet
     """
 
     def __init__(self):
@@ -355,8 +357,8 @@ class ASHModule(nn.Module):
         self.engine = None
 
     def to(self, device):
-        assert self.engine is not None
-        module = super(HashEmbedder, self).to(device)
+        assert self.engine is not None, "engine is not initialized"
+        module = super(ASHModule, self).to(device)
         module.engine = module.engine.to(device)
         return module
 

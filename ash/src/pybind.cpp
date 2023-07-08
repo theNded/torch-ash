@@ -1,9 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
 
+#include "grid.h"
 #include "hashmap.h"
 #include "sampler.h"
-#include "sparsedense_grid.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<HashMap> hashmap(m, "HashMap");

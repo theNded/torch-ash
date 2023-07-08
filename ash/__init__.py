@@ -3,14 +3,12 @@ from .common import DotDict
 from .core import ASHEngine, ASHModule
 from .hashmap import HashMap, HashSet
 from .embedding import HashEmbedding
-from .sparsedense_grid import (
-    enumerate_neighbor_coord_offsets,
-    SparseDenseGridQuery,
-    SparseDenseGridQueryBackward,
+from .grid import (
     SparseDenseGrid,
     BoundedSparseDenseGrid,
     UnBoundedSparseDenseGrid,
 )
-from .marching_cubes import marching_cubes
+from .grid_query import SparseDenseGridQuery, SparseDenseGridQueryBackward
+from .grid_nns import enumerate_neighbor_coord_offsets
 
 from .mlp import SirenLayer, SirenNet, MLP

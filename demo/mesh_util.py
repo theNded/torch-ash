@@ -4,11 +4,7 @@ import skimage.measure
 import plyfile
 import numpy as np
 import logging
-import math
 import torch
-from torch import nn
-import torch.nn.functional as F
-from einops import rearrange
 
 # temporary helpers
 # TODO: replace them with versatile torch-ash MarchingCubes

@@ -1,8 +1,8 @@
 #include <c10/cuda/CUDAException.h>
 
+#include "grid.h"
 #include "mc_macros.h"
 #include "minivec.h"
-#include "sparsedense_grid.h"
 
 template <typename scalar_t>
 class SmoothStepFunctor {
@@ -946,7 +946,7 @@ std::tuple<at::Tensor, at::Tensor> marching_cubes(
 }
 
 // Only provide forward convolution (interpolation) for now
-
+// TODO: add backward convolution and accelerate
 template <typename scalar_t>
 __global__ void convolution_forward_kernel(
         const scalar_t* __restrict__ inputs,
@@ -987,10 +987,6 @@ __global__ void convolution_forward_kernel(
         if (grid_nb_idx < 0) continue;
 
         int cell_nb_idx = cell_nb2cell_idx[k];
-        // printf("k: %d, grid_idx: %d, cell_idx: %d, grid_nb=%d,
-        // grid_nb_idx=%d, "
-        //        "cell_nb_idx=%d\n",
-        //        k, grid_idx, cell_idx, grid_nb, grid_nb_idx, cell_nb_idx);
         const scalar_t* input =
                 inputs + (grid_nb_idx * num_cells_per_grid + cell_nb_idx) *
                                  embedding_dims;
@@ -1028,24 +1024,6 @@ at::Tensor convolution_forward(
 
     const int threads = 256;
     const int blocks = (len + threads - 1) / threads;
-    std::cout << "input size: " << inputs.sizes() << std::endl;
-    std::cout << "weights size: " << weights.sizes() << std::endl;
-    std::cout << "masks size: " << masks.sizes() << std::endl;
-    std::cout << "grid_indices size: " << grid_indices.sizes() << std::endl;
-    std::cout << "cell_indices size: " << cell_indices.sizes() << std::endl;
-    std::cout << "lut_grid_nb2grid_idx size: " << lut_grid_nb2grid_idx.sizes()
-              << std::endl;
-    std::cout << "lut_cell_nb2cell_idx size: " << lut_cell_nb2cell_idx.sizes()
-              << std::endl;
-    std::cout << "lut_cell_nb2grid_nb size: " << lut_cell_nb2grid_nb.sizes()
-              << std::endl;
-    std::cout << "outputs size: " << outputs.sizes() << std::endl;
-    std::cout << "num_cell_nbs: " << num_cell_nbs << std::endl;
-    std::cout << "num_grid_nbs: " << num_grid_nbs << std::endl;
-    std::cout << "grid_dim: " << grid_dim << std::endl;
-    std::cout << "num_cells_per_grid: " << num_cells_per_grid << std::endl;
-    std::cout << "embedding_dims: " << embedding_dims << std::endl;
-    std::cout << "len: " << len << std::endl;
     AT_DISPATCH_FLOATING_TYPES(
             inputs.scalar_type(), "convolution_forward", [&] {
                 convolution_forward_kernel<scalar_t><<<blocks, threads>>>(
