@@ -7,6 +7,7 @@ from .common import _get_c_extension
 
 backend = _get_c_extension()
 
+
 class SparseDenseGridQuery(torch.autograd.Function):
     """Interpolate the embeddings.
     Each query point x can be located in a cell with grid_indices and cell_indices.

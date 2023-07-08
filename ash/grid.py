@@ -8,7 +8,10 @@ from typing import (
 
 import torch
 import torch.nn as nn
+
 from .grid_query import SparseDenseGridQuery, SparseDenseGridQueryBackward
+from .grid_nns import enumerate_neighbor_coord_offsets
+
 from .core import ASHEngine, ASHModule
 from .hashmap import HashSet
 
@@ -85,155 +88,92 @@ class SparseDenseGrid(ASHModule):
             )
         )
 
-        # Dense grid look up tables for each cell and their neighbors
+        # Cache useful constants to avoid duplicate computation in kernels
+
+        # Dense cells have a fixed structure and their properties
+        # can be constructed at initialization.
         self.cell_indices = torch.arange(
             self.num_cells_per_grid, dtype=torch.long, device=self.device
         )
+
         self.cell_coords = self._delinearize_cell_indices(self.cell_indices)
         assert self.cell_coords.shape == (self.num_cells_per_grid, in_dim)
 
-        # These LUTs only depend on grid_dim
         (
             self.lut_cell_nb2grid_nb,
             self.lut_cell_nb2cell_idx,
         ) = self.construct_cell_neighbor_lut(radius=1, bidirectional=False)
 
-        # These LUTs and properties depend on active entries at runtime.
-        # Sparse grid look up tables for each grid and their neighbors
-        # Need to be constructed after spatial intialization
+        # Sparse grids are active entries and can only be acquired at run time.
+        self.grid_indices = None
         self.grid_coords = None
         self.lut_grid_nb2grid_idx = None
 
-    @torch.no_grad()
-    def construct_cell_neighbor_lut(
-        self, radius, bidirectional
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        (
-            cell_coord_offsets,
-            cell_coord_fn_offset2idx,
-        ) = enumerate_neighbor_coord_offsets(
-            self.in_dim, radius, bidirectional, self.device
-        )
-
-        (
-            grid_coord_offsets,
-            grid_coord_fn_offset2idx,
-        ) = enumerate_neighbor_coord_offsets(
-            self.in_dim,
-            (radius + self.grid_dim - 1) // self.grid_dim,
-            bidirectional,
-            self.device,
-        )
-
-        assert self.cell_coords is not None
-        cell_nb_coords = self.cell_coords.view(
-            -1, 1, self.in_dim
-        ) + cell_coord_offsets.view(1, -1, self.in_dim)
-
-        cell_nb_coords = cell_nb_coords.view(-1, self.in_dim)
-
-        grid_nb_offsets = torch.div(
-            cell_nb_coords, self.grid_dim, rounding_mode="floor"
-        ).long()
-        cell_nb_coords = torch.remainder(cell_nb_coords, self.grid_dim)
-        cell_nb_indices = self._linearize_cell_coords(cell_nb_coords)
-
-        grid_nbs = grid_coord_fn_offset2idx(grid_nb_offsets)
-
-        lut_cell_nb2grid_nb = grid_nbs.view(self.num_cells_per_grid, -1)
-        lut_cell_nb2cell_idx = cell_nb_indices.view(self.num_cells_per_grid, -1)
-
-        return lut_cell_nb2grid_nb, lut_cell_nb2cell_idx
-
-    @torch.no_grad()
-    def construct_grid_neighbor_lut(
-        self, radius, bidirectional
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Construct a neighbor lookup table for the sparse-dense grid.
-        This should only be called once the sparse grid is initialized.
-        Used for trilinear interpolation in query and marching cubes.
-        Updates:
-            self.grid_coords: (num_embeddings, in_dim)
-            self.lut_grid_nb2grid_idx: (num_embeddings, 2**in_dim)
-        For non-active entries, the neighbor indices are set to -1.
+    ###
+    # Sparse grid allocation
+    ###
+    def spatial_init_(
+        self, points: torch.Tensor, dilation: int = 1, bidirectional: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Initialize the grid with points in the world coordinate system.
+        Args:
+            keys: (N, in_dim) tensor of points in the world coordinate system
+            dilation: dilation radius per cell of input
+        Returns:
+            Affected sparse/dense coordinates and indices
         """
-        active_grid_coords, active_grid_indices = self.engine.items()
+        # TODO(wei): optimize for speed if necessary
+        points = self.transform_world_to_cell(points)
 
-        (
-            grid_coord_offsets,
-            grid_coord_fn_offset2idx,
-        ) = enumerate_neighbor_coord_offsets(
-            self.in_dim,
-            radius,
-            bidirectional,
-            self.device,
+        grid_coords = torch.floor(points / self.grid_dim).int()
+        grid_coords = self.grids_in_bound(grid_coords)
+
+        grid_nb_coord_offsets, _ = enumerate_neighbor_coord_offsets(
+            self.in_dim, dilation, bidirectional=bidirectional, device=self.device
         )
-        num_nbs = len(grid_coord_offsets)
-        print(f"num grid nbs: {num_nbs}")
-
-        active_grid_nb_coords = (
-            active_grid_coords.view(-1, 1, self.in_dim).int()
-            + grid_coord_offsets.view(1, -1, self.in_dim).int()
-        ).view(-1, self.in_dim)
-
-        # (N*2**in_dim, ), (N*2**in_dim, )
-        active_grid_nb_indices, active_grid_nb_masks = self.engine.find(
-            active_grid_nb_coords
-        )
-        # Set not found neighbor indices to -1
-        active_grid_nb_indices[~active_grid_nb_masks] = -1
-
-        # Create a dense lookup table for sparse coords and neighbor indices
-        grid_coords = torch.empty(
-            (self.num_embeddings, self.in_dim), dtype=torch.int32, device=self.device
-        )
-        grid_coords.fill_(-1)
-        grid_coords[active_grid_indices] = active_grid_coords
-
-        lut_grid_nb2grid_idx = torch.empty(
-            self.num_embeddings, num_nbs, dtype=torch.int64, device=self.device
-        )
-        lut_grid_nb2grid_idx.fill_(-1)
-        lut_grid_nb2grid_idx[active_grid_indices] = active_grid_nb_indices.view(
-            -1, num_nbs
-        )
-        return grid_coords, lut_grid_nb2grid_idx
-
-    @torch.no_grad()
-    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
-        self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
-            radius, bidirectional
+        grid_nb_coords = (grid_coords.view(-1, 1, 3) + grid_nb_coord_offsets).view(
+            -1, 3
         )
 
-    @torch.no_grad()
-    def get_bbox(self):
-        return self.bbox_min, self.bbox_max
+        # No need to use a huge hash set due to the duplicates
+        hash_set = HashSet(key_dim=3, capacity=len(grid_coords), device=self.device)
+        hash_set.insert(grid_nb_coords)
+        unique_grid_coords = hash_set.keys()
+        unique_grid_coords = self.grids_in_bound(unique_grid_coords)
 
-    @torch.no_grad()
-    def _linearize_cell_coords(self, cell_coords: torch.Tensor) -> torch.Tensor:
-        assert len(cell_coords.shape) == 2 and cell_coords.shape[1] == self.in_dim
+        self.engine.insert_keys(unique_grid_coords)
+        grid_indices, masks = self.engine.find(unique_grid_coords)
+        assert masks.all()
 
-        """Convert dense coordinates to dense indices."""
-        cell_indices = torch.zeros_like(
-            cell_coords[:, 0], dtype=torch.long, device=self.device
+        return (
+            unique_grid_coords.view(-1, 1, self.in_dim),
+            self.cell_coords.view(1, -1, self.in_dim),
+            grid_indices.view(-1, 1),
+            self.cell_indices.view(1, -1),
         )
-        for i in range(self.in_dim):
-            cell_indices += cell_coords[:, i] * self.grid_dim**i
-        return cell_indices.long()
 
-    @torch.no_grad()
-    def _delinearize_cell_indices(self, cell_indices: torch.Tensor) -> torch.Tensor:
-        """Convert dense indices to dense coordinates."""
-        cell_coords = []
-        cell_indices_iter = cell_indices.clone()
-        for i in range(self.in_dim):
-            cell_coords.append(cell_indices_iter % self.grid_dim)
-            cell_indices_iter = torch.div(
-                cell_indices_iter, self.grid_dim, rounding_mode="floor"
-            )
-        cell_coords = torch.stack(cell_coords, dim=1)
-        return cell_coords.int()
+    # Geometry-based initialization
+    def ray_init_(
+        self,
+        ray_o: torch.Tensor,
+        rays_d: torch.Tensor,
+        rays_near: torch.Tensor,
+        rays_far: torch.Tensor,
+        dilation: int = 3,
+    ) -> None:
+        """Initialize the grid with rays.
+        Args:
+            ray_o: (N, in_dim) tensor of ray origins
+            rays_d: (N, in_dim) tensor of ray directions
+            rays_near: (N, 1) tensor of ray near range
+            rays_far: (N, 1) tensor of ray far range
+            dilation: dilation factor per cell along the ray
+        """
+        raise NotImplementedError("Ray-tracing initialization not implemented yet")
 
+    ###
+    # Core sparse-dense query and enumeration
+    ###
     def query(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns:
         grid_indices: (N, 1) tensor of sparse grid indices
@@ -319,6 +259,13 @@ class SparseDenseGrid(ASHModule):
             self.cell_indices.view(1, -1),
         )
 
+    ###
+    # Geometric and index transform
+    ###
+    @torch.no_grad()
+    def get_bbox(self):
+        return self.bbox_min, self.bbox_max
+
     def cell_to_world(
         self, grid_coords: torch.Tensor, cell_coords: torch.Tensor
     ) -> torch.Tensor:
@@ -338,65 +285,34 @@ class SparseDenseGrid(ASHModule):
         """Placeholder for bounded version"""
         return grid_coords
 
-    def spatial_init_(
-        self, points: torch.Tensor, dilation: int = 1, bidirectional: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Initialize the grid with points in the world coordinate system.
-        Args:
-            keys: (N, in_dim) tensor of points in the world coordinate system
-            dilation: dilation radius per cell of input
-        Returns:
-            Affected sparse/dense coordinates and indices
-        """
-        # TODO(wei): optimize for speed if necessary
-        points = self.transform_world_to_cell(points)
+    @torch.no_grad()
+    def _linearize_cell_coords(self, cell_coords: torch.Tensor) -> torch.Tensor:
+        assert len(cell_coords.shape) == 2 and cell_coords.shape[1] == self.in_dim
 
-        grid_coords = torch.floor(points / self.grid_dim).int()
-        grid_coords = self.grids_in_bound(grid_coords)
-
-        grid_nb_coord_offsets, _ = enumerate_neighbor_coord_offsets(
-            self.in_dim, dilation, bidirectional=bidirectional, device=self.device
+        """Convert dense coordinates to dense indices."""
+        cell_indices = torch.zeros_like(
+            cell_coords[:, 0], dtype=torch.long, device=self.device
         )
-        grid_nb_coords = (grid_coords.view(-1, 1, 3) + grid_nb_coord_offsets).view(
-            -1, 3
-        )
+        for i in range(self.in_dim):
+            cell_indices += cell_coords[:, i] * self.grid_dim**i
+        return cell_indices.long()
 
-        # No need to use a huge hash set due to the duplicates
-        hash_set = HashSet(key_dim=3, capacity=len(grid_coords), device=self.device)
-        hash_set.insert(grid_nb_coords)
-        unique_grid_coords = hash_set.keys()
-        unique_grid_coords = self.grids_in_bound(unique_grid_coords)
+    @torch.no_grad()
+    def _delinearize_cell_indices(self, cell_indices: torch.Tensor) -> torch.Tensor:
+        """Convert dense indices to dense coordinates."""
+        cell_coords = []
+        cell_indices_iter = cell_indices.clone()
+        for i in range(self.in_dim):
+            cell_coords.append(cell_indices_iter % self.grid_dim)
+            cell_indices_iter = torch.div(
+                cell_indices_iter, self.grid_dim, rounding_mode="floor"
+            )
+        cell_coords = torch.stack(cell_coords, dim=1)
+        return cell_coords.int()
 
-        self.engine.insert_keys(unique_grid_coords)
-        grid_indices, masks = self.engine.find(unique_grid_coords)
-        assert masks.all()
-
-        return (
-            unique_grid_coords.view(-1, 1, self.in_dim),
-            self.cell_coords.view(1, -1, self.in_dim),
-            grid_indices.view(-1, 1),
-            self.cell_indices.view(1, -1),
-        )
-
-    # Geometry-based initialization
-    def ray_init_(
-        self,
-        ray_o: torch.Tensor,
-        rays_d: torch.Tensor,
-        rays_near: torch.Tensor,
-        rays_far: torch.Tensor,
-        dilation: int = 3,
-    ) -> None:
-        """Initialize the grid with rays.
-        Args:
-            ray_o: (N, in_dim) tensor of ray origins
-            rays_d: (N, in_dim) tensor of ray directions
-            rays_near: (N, 1) tensor of ray near range
-            rays_far: (N, 1) tensor of ray far range
-            dilation: dilation factor per cell along the ray
-        """
-
+    ###
     # Sampling
+    ###
     @torch.no_grad()
     def ray_sample(
         self,
@@ -464,7 +380,11 @@ class SparseDenseGrid(ASHModule):
         Returns:
             samples: (num_samples, in_dim) tensor of samples
         """
+        raise NotImplementedError("uniform_sample not implemented")
 
+    ###
+    # Convolution/filter for sparse-dense structure
+    ###
     @torch.no_grad()
     def gaussian_filter_(self, size, sigma):
         """Gaussian filter.
@@ -496,13 +416,15 @@ class SparseDenseGrid(ASHModule):
 
             raise NotImplementedError("Unsupported dimension")
 
-        embedding_dim = self.embeddings.shape[-1]
-        weights = gkern(size, sigma, dim=3).view(size, size, size, 1).repeat(1, 1, 1, 3)
+        filter_dim = self.embeddings.shape[-1]
+        weights = (
+            gkern(size, sigma, dim=3)
+            .view(size, size, size, 1)
+            .repeat(1, 1, 1, filter_dim)
+        )
         weights = weights.to(self.embeddings.device)
 
-        self.embeddings[..., 1:4].copy_(
-            self.convolution(self.embeddings[..., 1:4].contiguous(), weights)
-        )
+        self.embeddings.copy_(self.convolution(self.embeddings, weights))
 
     def convolution(self, inputs, weights):
         # inputs: (num_embeddings, num_cells_per_grid, in_dim)
@@ -521,6 +443,7 @@ class SparseDenseGrid(ASHModule):
         assert weights.shape[3] == inputs.shape[-1]
         assert weights.device == inputs.device
 
+        # The window is (usually) larger than the interpolation window
         (
             conv_lut_cell_nb2grid_nb,
             conv_lut_cell_nb2cell_idx,
@@ -532,17 +455,9 @@ class SparseDenseGrid(ASHModule):
         )
 
         grid_coords, cell_coords, grid_indices, cell_indices = self.items()
-        import ipdb
-
-        ipdb.set_trace()
 
         num_cell_nbs = conv_lut_cell_nb2grid_nb.shape[1]
         weights = weights.view(num_cell_nbs, weights.shape[-1])
-        print(weights)
-        print(weights.is_contiguous())
-        print(weights.dtype)
-        print(weights.shape)
-        print(weights.device)
         output = backend.convolution_forward(
             inputs,
             weights,
@@ -557,6 +472,112 @@ class SparseDenseGrid(ASHModule):
 
         return output
 
+    ###
+    # Radius neighbor lookup table construction
+    ###
+    @torch.no_grad()
+    def construct_cell_neighbor_lut(
+        self, radius, bidirectional
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        (
+            cell_coord_offsets,
+            cell_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim, radius, bidirectional, self.device
+        )
+
+        (
+            grid_coord_offsets,
+            grid_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim,
+            (radius + self.grid_dim - 1) // self.grid_dim,
+            bidirectional,
+            self.device,
+        )
+
+        assert self.cell_coords is not None
+        cell_nb_coords = self.cell_coords.view(
+            -1, 1, self.in_dim
+        ) + cell_coord_offsets.view(1, -1, self.in_dim)
+
+        cell_nb_coords = cell_nb_coords.view(-1, self.in_dim)
+
+        grid_nb_offsets = torch.div(
+            cell_nb_coords, self.grid_dim, rounding_mode="floor"
+        ).long()
+        cell_nb_coords = torch.remainder(cell_nb_coords, self.grid_dim)
+        cell_nb_indices = self._linearize_cell_coords(cell_nb_coords)
+
+        grid_nbs = grid_coord_fn_offset2idx(grid_nb_offsets)
+
+        lut_cell_nb2grid_nb = grid_nbs.view(self.num_cells_per_grid, -1)
+        lut_cell_nb2cell_idx = cell_nb_indices.view(self.num_cells_per_grid, -1)
+
+        return lut_cell_nb2grid_nb, lut_cell_nb2cell_idx
+
+    @torch.no_grad()
+    def construct_grid_neighbor_lut(
+        self, radius, bidirectional
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Construct a neighbor lookup table for the sparse-dense grid.
+        This should only be called once the sparse grid is initialized.
+        Used for trilinear interpolation in query and marching cubes.
+        Updates:
+            self.grid_coords: (num_embeddings, in_dim)
+            self.lut_grid_nb2grid_idx: (num_embeddings, 2**in_dim)
+        For non-active entries, the neighbor indices are set to -1.
+        """
+        active_grid_coords, active_grid_indices = self.engine.items()
+
+        (
+            grid_coord_offsets,
+            grid_coord_fn_offset2idx,
+        ) = enumerate_neighbor_coord_offsets(
+            self.in_dim,
+            radius,
+            bidirectional,
+            self.device,
+        )
+        num_nbs = len(grid_coord_offsets)
+
+        active_grid_nb_coords = (
+            active_grid_coords.view(-1, 1, self.in_dim).int()
+            + grid_coord_offsets.view(1, -1, self.in_dim).int()
+        ).view(-1, self.in_dim)
+
+        # (N*2**in_dim, ), (N*2**in_dim, )
+        active_grid_nb_indices, active_grid_nb_masks = self.engine.find(
+            active_grid_nb_coords
+        )
+        # Set not found neighbor indices to -1
+        active_grid_nb_indices[~active_grid_nb_masks] = -1
+
+        # Create a dense lookup table for sparse coords and neighbor indices
+        grid_coords = torch.empty(
+            (self.num_embeddings, self.in_dim), dtype=torch.int32, device=self.device
+        )
+        grid_coords.fill_(-1)
+        grid_coords[active_grid_indices] = active_grid_coords
+
+        lut_grid_nb2grid_idx = torch.empty(
+            self.num_embeddings, num_nbs, dtype=torch.int64, device=self.device
+        )
+        lut_grid_nb2grid_idx.fill_(-1)
+        lut_grid_nb2grid_idx[active_grid_indices] = active_grid_nb_indices.view(
+            -1, num_nbs
+        )
+        return grid_coords, lut_grid_nb2grid_idx
+
+    @torch.no_grad()
+    def construct_grid_neighbor_lut_(self, radius, bidirectional) -> None:
+        self.grid_coords, self.lut_grid_nb2grid_idx = self.construct_grid_neighbor_lut(
+            radius, bidirectional
+        )
+
+    ###
+    # Surface extraction
+    ###
     def marching_cubes(
         self,
         tsdfs: torch.Tensor,
@@ -793,386 +814,3 @@ class BoundedSparseDenseGrid(SparseDenseGrid):
         )
 
         self.engine.insert_keys(grid_coords)
-
-
-"""
-One core operation is neighbor look up. It is essential for trilinear interpolation in query, and convolution.
-An intuitive approach would be computing offsets on-the-fly (in kernels):
-    cell_offset_table = [[0,0,0], ..., [cell_radius-1,cell_radius-1,cell_radius-1]]
-    grid_coords, cell_coords = ...
-
-    cell_coord = grid_coords[grid_idx] * grid_dim + cell_coords[cell_idx]
-    for cell_nb in range(cell_radius**3):
-        cell_offset = offset_table[cell_nb]
-
-        cell_nb_coord = cell_coord + cell_offset
-
-        grid_nb_coord = cell_nb_coord // grid_dim
-        cell_nb_coord = cell_nb_coord % grid_dim
-
-        grid_nb_idx = hashmap.find(grid_nb_coord)
-        cell_nb_idx = linearize(cell_nb_coord, grid_dim)
-
-But given a fixed cell search radius, we can cache most of intermediate look up tables
-and remove the usage of hash maps in kernels.
-1. We can estimate the grid search radius by
-    grid_radius = (grid_dim - 1 + cell_radius) // grid_dim
-2. We can then construct a neighbor grid look up table once the active entries are activated:
-    lut_grid_nb2grid_idx = torch.zeros(num_embeddings, grid_radius**3)
-    grid_nb_offsets = compute_offset(grid_radius)
-    grid_indices, grid_coords = grid.items()
-    grid_nb_indices, masks = hashmap.find(grid_coords + grid_nb_offsets)
-    lut_grid_nb2grid_idx[grid_indices] = grid_indices_nb
-    # need to handle boundary cases
-3. Then we construct look up tables for cells:
-    lut_cell_nb2grid_nb = torch.zeros(num_cells_per_grid, cell_radius**3)
-    lut_cell_nb2cell_idx = torch.zeros(num_cells_per_grid, cell_radius**3)
-
-    # Could be vectorized
-    for cell_nb in range(cell_radius**3):
-        cell_nb_offset = offset_table[i]
-        for j in range(num_cells_per_grid):
-            cell_coord = cell_coords[j]
-            cell_nb_coord = cell_coord + cell_nb_offset
-
-            grid_nb_offset = grid_offset // grid_dim
-            cell_nb_coord = cell_offset % grid_dim
-
-            grid_nb = grid_nb_from_offset(grid_nb_offset)
-            lut_cell_nb2grid_nb[cell_nb] = grid_nb
-            lut_cell_nb2cell_idx[cell_nb] = linearize(cell_nb_coord, grid_dim)
-
-To use such luts, we run
-grid_idx, cell_idx = ...
-for cell_nb in range(cell_radius**3):
-    grid_nb = lut_cell_nb2grid_nb[cell_idx, cell_nb]
-    grid_nb_idx = lut_grid_nb2grid_idx[grid_idx, grid_nb]
-    cell_nb_idx = lut_cell_nb2cell_idx[cell_idx, cell_nb]
-
-and we are all set.
-
-The naming conventions are:
-- grid_nb / cell_nb denote the neighbor id within range [0, radius**3]
-- Their associated properties would be grid_nb_idx / grid_nb_coord / cell_nb_idx / cell_nb_coord, etc.
-"""
-
-
-def enumerate_neighbor_coord_offsets(
-    dim: int, radius: int, bidirectional: bool, device: torch.device
-) -> Tuple[torch.Tensor, Callable[[torch.Tensor], torch.Tensor]]:
-    """Generate neighbor coordinate offsets.
-    This function is independent of the choice of grid or cell.
-    In the 1-radius, non-bidirectional case, it is equivalent to morton code
-    i.e., 001, 010, 011, 100, 101, 110, 111 (3 digits in zyx order)
-    Args:
-        dim: dimension of the coordinate
-        radius: radius of the neighborhood
-        bidirectional: whether to include negative offsets.
-    Returns:
-        If bidirectional: enumerating [-r, -r, -r] -- [r, r, r]
-          returns a tensor of shape ((2 * radius + 1) ** dim, dim)
-        If not bidirectional: enumerating [0, 0, 0] -- [r, r, r]
-          returns a tensor of shape ((radius + 1) ** dim, dim)
-    """
-    if bidirectional:
-        arange = torch.arange(-radius, radius + 1, device=device)
-    else:
-        arange = torch.arange(0, radius + 1, device=device)
-
-    idx2offset = (
-        torch.stack(torch.meshgrid(*[arange for _ in range(dim)], indexing="ij"))
-        .reshape(dim, -1)
-        .T.flip(dims=(1,))  # zyx order => xyz for easier adding
-        .contiguous()
-    )
-
-    def fn_offset2idx(offset: torch.Tensor) -> torch.Tensor:
-        """
-        offset: (N, 3)
-        returns idx: (N, 1)
-        """
-        assert len(offset.shape) == 2
-        padding = radius if bidirectional else 0
-        window = 2 * radius + 1 if bidirectional else radius + 1
-        idx = torch.zeros_like(offset[:, 0])
-        for i in range(dim - 1, -1, -1):
-            idx = (offset[:, i] + padding) + idx * window
-        return idx
-
-    return idx2offset, fn_offset2idx
-
-
-class SparseDenseGridQuery(torch.autograd.Function):
-    """Interpolate the embeddings.
-    Each query point x can be located in a cell with grid_indices and cell_indices.
-    The offset defined by its relative position to the cell corner gives interpolation ratio in the cell unit.
-
-    Therefore the output is differentiable w.r.t. embeddings and offsets.
-    ----------
-    |     |  |
-    |---->x  |
-    |        |
-    ----------
-    """
-
-    @staticmethod
-    def forward(
-        ctx,
-        embeddings: torch.Tensor,
-        offsets: torch.Tensor,
-        grid_indices: torch.Tensor,
-        cell_indices: torch.Tensor,
-        masks: torch.Tensor,
-        lut_grid_nb2grid_idx: torch.Tensor,
-        lut_cell_nb2cell_idx: torch.Tensor,
-        lut_cell_nb2grid_nb: torch.Tensor,
-        grid_dim: int,
-        interpolation: Literal["linear", "smooth_step"] = "smooth_step",
-    ) -> torch.Tensor:
-        """
-        Forward pass of the interpolation.
-        For simplicity, we only consider a single query point offset of (3,) and its 8 neighbors
-        y = \\sum_{i=0}^7 weight(offset)[i] * embeddings[i]
-        Args:
-            embeddings: (num_embeddings, cells_per_grid, embedding_dim) embeddings of the grid [differentiable]
-            offsets: (num_queries, 3) offsets of the input [differentiable]
-
-            grid_indices: (num_queries, 1) grid index of the input
-            cell_indices: (num_queries, 1) cell index of the input
-            masks: (num_queries, 1) mask of the input
-
-            lut_grid_nb2grid_idx: (num_embeddings, 8) precomputed neighbor table from grid index to grid index
-            lut_cell_nb2cell_idx: (cells_per_grid, 8) precomputed neighbor table from cell index to cell index
-            lut_cell_nb2grid_nb: (cells_per_grid, 8) precomputed neighbor table from cell index to grid index
-
-            grid_dim: int cells_per_grid = grid_dim**3
-
-        Returns:
-            y: (num_queries, embedding_dim) interpolated embeddings
-        """
-        ctx.save_for_backward(
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-        )
-
-        ctx.grid_dim = grid_dim
-        ctx.interpolation = interpolation
-
-        y = backend.query_forward(
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-            grid_dim,
-            interpolation,
-        )
-        return y
-
-    @staticmethod
-    def backward(ctx, z: torch.Tensor):
-        """Backward pass of the interpolation.
-        Supports both forward (for explicit gradient computation via autograd.grad)
-        and the conventional backward.
-        Detailed in SparseDenseGridQueryBackward.
-        """
-        (
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-        ) = ctx.saved_tensors
-
-        grad_embeddings, grad_offsets = SparseDenseGridQueryBackward.apply(
-            z.contiguous(),
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-            ctx.grid_dim,
-            ctx.interpolation,
-        )
-
-        return (
-            grad_embeddings,
-            grad_offsets,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-class SparseDenseGridQueryBackward(torch.autograd.Function):
-    @staticmethod
-    def forward(
-        ctx,
-        z,
-        embeddings,
-        offsets,
-        grid_indices,
-        cell_indices,
-        masks,
-        lut_grid_nb2grid_idx,
-        lut_cell_nb2cell_idx,
-        lut_cell_nb2grid_nb,
-        grid_dim,
-        interpolation,
-    ):
-        """
-        Forward pass of the backward function.
-        Args:
-            z: (num_queries, embedding_dim) gradient of the output w.r.t. y
-
-            z could be a tensor without gradient.
-            Itself is the gradient of the loss w.r.t. y, i.e.,
-                output = dL/dy * dy/dembeddings, dL/dy * dy/doffsets
-                       = dL/dembeddings, dL/doffsets
-
-            z could also be a tensor with gradient when used as the forward pass
-            to compute jvp via torch.autograd.grad.
-            It gradient should be passed back to downstream layers (e.g. MLP).
-
-            Since y = \\sum_{i=0}^7 weight(offset)[i] * embeddings[i]
-
-            grad_embeddings[i] = z * weight(offset)[i]
-            grad_outputs = (z * embeddings[i]) * grad_weight(offset)[i]
-
-        weight = [(1-x)(1-y)(1-z), x(1-y)(1-z), ..., xyz] (1 x 8)
-        grad_weight = [[-(1-y)(1-z), (1-y)(1-z), ..., yz] (3 x 8)
-                       [-(1-x)(1-z), -x(1-z), ...,    xz]
-                       [-(1-x)(1-y), -x(1-y), ...,    xy]
-        hessian_weight = [[0 1-z 1-y]            [0 z y]  ((3,3) x 8)
-                          [1-z 0 1-x]            [z 0 x]
-                          [1-y 1-x 0], ...,      [y x 0]]
-
-        Returns:
-            grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
-            grad_offsets: (num_queries, 3)
-        """
-        ctx.save_for_backward(
-            z,
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-        )
-        ctx.grid_dim = grid_dim
-        ctx.interpolation = interpolation
-
-        grad_embeddings, grad_offsets = backend.query_backward_forward(
-            z,
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-            grid_dim,
-            interpolation,
-        )
-
-        return grad_embeddings, grad_offsets
-
-    @staticmethod
-    def backward(
-        ctx, grad_grad_embeddings: torch.Tensor, grad_grad_offsets: torch.Tensor
-    ):
-        """Backward pass of the backward function.
-        When a gradient is computed in by the backward's forward pass and used to compute a loss, its gradient
-        need to be properly back propagated back to embeddings and offsets.
-
-        Args:
-            z: (num_queries, embedding_dim) gradient of the output w.r.t. y
-            grad_grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
-            grad_grad_offsets: (num_queries, 3)
-
-            Let
-                w1 = grad_embeddings[i] = z * weight(offset)[i], grad_w1 = grad_grad_embeddings[i]
-                w2 = grad_offsets = (z * embeddings[i]) * grad_weight(offset)[i], grad_w2 = grad_grad_offsets
-
-        TODO: now grad_grad_embeddings is not used. If feature-grid regularization is needed,
-        we need to add it back. Now we safely ignore grad_w1.
-        TODO: at current, grad_offsets are skipped as offsets are not optimized.
-            Then we have
-                grad_z = grad_w1 * dw1/dz + grad_w2 * dw2/dz = grad_w2 * dw2/dz
-                       = (grad_w2 * grad_weight(offset)[i]) * embeddings[i] => (num_queries, embedding_dim)
-                grad_embeddings[i] = grad_w2 * dw1/dembeddings[i]
-                                   = (grad_w2  * grad_weight(offset)[i]) * z => (1, num_embeddings)
-                grad_offsets = grad_w2 * dw2/doffsets
-                             = (z * embeddings[i]) * grad_w2 * hessian_weight(offset)[i] => (1, 3)
-
-        Returns:
-            grad_z: (num_queries, embedding_dim) gradient of the output w.r.t. z
-            grad_embeddings: (num_embeddings, cells_per_grid, embedding_dim) gradient of the embeddings
-            grad_offsets: (num_queries, 3)
-        """
-
-        (
-            z,
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-        ) = ctx.saved_tensors
-
-        grad_z, grad_embeddings, grad_offsets = backend.query_backward_backward(
-            grad_grad_embeddings,
-            grad_grad_offsets,
-            z,
-            embeddings,
-            offsets,
-            grid_indices,
-            cell_indices,
-            masks,
-            lut_grid_nb2grid_idx,
-            lut_cell_nb2cell_idx,
-            lut_cell_nb2grid_nb,
-            ctx.grid_dim,
-            ctx.interpolation,
-        )
-
-        return (
-            grad_z,
-            grad_embeddings,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
