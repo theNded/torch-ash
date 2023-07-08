@@ -145,7 +145,7 @@ class TSDFFusion:
             cell_coords,
             grid_indices,
             cell_indices,
-        ) = self.grid.spatial_init_(points, dilation=2, bidirectional=True)
+        ) = self.grid.spatial_init_(points, dilation=1, bidirectional=True)
         if len(grid_indices) == 0:
             return
 
@@ -188,6 +188,8 @@ if __name__ == "__main__":
     # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
+    parser.add_argument("--num_grids", type=int, default=80000,
+                        help="capacity of sparse grids")
     parser.add_argument("--voxel_size", type=float, default=-1)
     parser.add_argument("--resolution", type=int, default=256)
 
@@ -205,8 +207,8 @@ if __name__ == "__main__":
         normalize_scene = False
         grid = UnBoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=80000,
-            embedding_dim=5,
+            num_embeddings=args.num_grids,
+            embedding_dim=5,  # 5 dims corresponds to SDF(1) + weight(1) + RGB(3)
             grid_dim=8,
             cell_size=args.voxel_size,
             device=device,
@@ -217,7 +219,7 @@ if __name__ == "__main__":
         normalize_scene = True
         grid = BoundedSparseDenseGrid(
             in_dim=3,
-            num_embeddings=80000,
+            num_embeddings=args.num_grids,
             embedding_dim=5,
             grid_dim=8,
             sparse_grid_dim=32,
@@ -232,7 +234,7 @@ if __name__ == "__main__":
         depth_type=args.depth_type,
         depth_max=args.depth_max,
         normalize_scene=normalize_scene,
-        image_only=False,
+        generate_rays=False,
     )
 
     fuser = TSDFFusion(grid)
@@ -246,49 +248,10 @@ if __name__ == "__main__":
         )
     )
 
-    dataloader = Dataloader(
-        dataset, batch_size=100, shuffle=True, device=torch.device("cuda:0")
-    )
-    datum = next(iter(dataloader))
-
-    rays_o = datum["rays_o"]
-    rays_d = datum["rays_d"]
-    t_min = 0.1 if normalize_scene else 0.01  # meter
-    t_max = 1.7 if normalize_scene else args.depth_max  # meter
-    t_step = 2 * fuser.grid.cell_size
-    ray_indices, t_nears, t_fars, prefix_sum_ray_samples = fuser.grid.ray_sample(
-        rays_o=rays_o,
-        rays_d=rays_d,
-        t_min=t_min,
-        t_max=t_max,
-        t_step=t_step,
-    )
-
-    lineset = o3d.t.geometry.LineSet()
-    positions = torch.cat([rays_o + t_min * rays_d, rays_o + t_max * rays_d], dim=0)
-    indices = torch.cat(
-        [
-            torch.arange(len(rays_o)).view(-1, 1),
-            torch.arange(len(rays_o), 2 * len(rays_o)).view(-1, 1),
-        ],
-        dim=-1,
-    )
-    lineset.point.positions = positions.cpu().numpy()
-    lineset.line.indices = indices.cpu().numpy().astype(np.int32)
-
-    sample_positions = (
-        rays_o[ray_indices] + 0.5 * (t_nears + t_fars).view(-1, 1) * rays_d[ray_indices]
-    )
-    sample_pcd = o3d.t.geometry.PointCloud(sample_positions.cpu().numpy())
-
-    # sdf_fn and weight_fn
+    # sdf_fn and normal_fn
     def color_fn(x):
         embeddings, masks = fuser.grid(x, interpolation="linear")
         return embeddings[..., 1:4].contiguous()
-
-    def weight_fn(x):
-        embeddings, masks = fuser.grid(x, interpolation="linear")
-        return embeddings[..., 4:5].contiguous()
 
     def grad_fn(x):
         x.requires_grad_(True)
@@ -305,49 +268,6 @@ if __name__ == "__main__":
     def normal_fn(x):
         return F.normalize(grad_fn(x), dim=-1).contiguous()
 
-    def rgb_sigma_fn(t_nears, t_fars, ray_indices):
-        positions = rays_o[ray_indices] + rays_d[ray_indices] * (
-            0.5 * (t_nears + t_fars)
-        )
-
-        embeddings, masks = fuser.grid(positions, interpolation="linear")
-
-        sdfs = embeddings[..., 0].contiguous()
-        rgbs = embeddings[..., 1:4].contiguous()
-
-        beta = 0.01
-        alpha = 1.0 / beta
-        sigmas = (0.5 * alpha) * (1.0 + sdfs.sign() * torch.expm1(-sdfs.abs() / beta))
-        sigmas = torch.where(masks, sigmas, torch.zeros_like(sigmas))
-        return rgbs, sigmas.view(-1, 1)
-
-    sample_weights = weight_fn(sample_positions)
-    mask = (sample_weights >= 1.0).squeeze()
-
-    masked_ray_indices = ray_indices[mask]
-    sum_masked_ray_samples = torch.zeros(
-        (len(rays_o),), dtype=ray_indices.dtype, device=torch.device("cuda:0")
-    )
-    sum_masked_ray_samples.index_add_(
-        0, masked_ray_indices, torch.ones_like(masked_ray_indices)
-    )
-    color, opacity, depth = nerfacc.rendering(
-        t_nears[mask].view(-1, 1),
-        t_fars[mask].view(-1, 1),
-        ray_indices[mask],
-        n_rays=len(rays_o),
-        rgb_sigma_fn=rgb_sigma_fn,
-    )
-
-    lineset.line.colors = color.detach().cpu().numpy()
-
-    sample_colors = color_fn(sample_positions)
-    sample_normals = normal_fn(sample_positions)
-
-    sample_pcd.point.positions = sample_positions[mask].detach().cpu().numpy()
-    sample_pcd.point.colors = sample_colors[mask].detach().cpu().numpy()
-    sample_pcd.point.normals = sample_normals[mask].detach().cpu().numpy()
-
     sdf = fuser.grid.embeddings[..., 0].contiguous()
     weight = fuser.grid.embeddings[..., 4].contiguous()
     mesh = fuser.grid.marching_cubes(
@@ -359,9 +279,9 @@ if __name__ == "__main__":
         iso_value=0.0,
         weight_thr=0.5,
     )
-    #o3d.visualization.draw([mesh, lineset, sample_pcd, bbox_lineset])
 
-    fuser.grid.gaussian_filter_(7, 0.1)
+    # 7x7x7 gaussian filter
+    fuser.grid.gaussian_filter_(size=7, sigma=0.1)
 
     sdf = fuser.grid.embeddings[..., 0].contiguous()
     weight = fuser.grid.embeddings[..., 4].contiguous()
