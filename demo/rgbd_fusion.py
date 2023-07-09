@@ -33,12 +33,13 @@ class TSDFFusion:
     device = torch.device("cuda:0")
 
     def __init__(
-        self,
-        grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid],
+        self, grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid], dilation: int
     ):
         self.grid = grid
         self.voxel_size = self.grid.cell_size
-        self.trunc = 2 * self.voxel_size * self.grid.grid_dim
+
+        self.dilation = dilation
+        self.trunc = self.dilation * self.voxel_size * self.grid.grid_dim
 
     @torch.no_grad()
     def fuse_dataset(self, dataset):
@@ -145,7 +146,7 @@ class TSDFFusion:
             cell_coords,
             grid_indices,
             cell_indices,
-        ) = self.grid.spatial_init_(points, dilation=1, bidirectional=True)
+        ) = self.grid.spatial_init_(points, dilation=self.dilation, bidirectional=True)
         if len(grid_indices) == 0:
             return
 
@@ -237,7 +238,8 @@ if __name__ == "__main__":
         generate_rays=False,
     )
 
-    fuser = TSDFFusion(grid)
+    dilation = 1 if args.depth_type == "sensor" else 2
+    fuser = TSDFFusion(grid, dilation)
     fuser.fuse_dataset(dataset)
     print(f"hash map size after fusion: {fuser.grid.engine.size()}")
 
@@ -277,7 +279,7 @@ if __name__ == "__main__":
         color_fn=color_fn,
         normal_fn=normal_fn,
         iso_value=0.0,
-        weight_thr=0.5,
+        weight_thr=2,
     )
 
     # 7x7x7 gaussian filter
@@ -292,7 +294,8 @@ if __name__ == "__main__":
         color_fn=color_fn,
         normal_fn=normal_fn,
         iso_value=0.0,
-        weight_thr=0.5,
+        weight_thr=2,
     )
     o3d.visualization.draw([mesh, mesh_filtered])
 
+    torch.save(fuser.grid.state_dict(), "grid.pt")
