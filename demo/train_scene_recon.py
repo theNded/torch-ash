@@ -46,8 +46,8 @@ class PlainVoxels(nn.Module):
 
         self.sdf_to_sigma = SDFToSigma(beta=0.01, device=device)
 
-    def fuse_dataset(self, dataset):
-        fuser = TSDFFusion(self.grid)
+    def fuse_dataset(self, dataset, dilation):
+        fuser = TSDFFusion(self.grid, dilation=dilation)
         fuser.fuse_dataset(dataset)
         fuser.prune_(0.5)
 
@@ -200,11 +200,12 @@ if __name__ == "__main__":
         depth_type=args.depth_type,
         depth_max=args.depth_max,
         normalize_scene=True,
-        image_only=False,
+        generate_rays=True,
     )
 
     model = PlainVoxels(device=torch.device("cuda:0"))
-    model.fuse_dataset(dataset)
+    dilation = 1 if args.depth_type == "sensor" else 2
+    model.fuse_dataset(dataset, dilation)
     mesh = model.marching_cubes()
     o3d.visualization.draw([mesh])
 
