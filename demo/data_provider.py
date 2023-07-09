@@ -138,13 +138,13 @@ class ImageDataset(torch.utils.data.Dataset):
         depth_type: Literal["sensor", "learned"] = "sensor",
         depth_max: float = 4.0,
         normalize_scene: bool = True,
-        image_only: bool = False,
+        generate_rays: bool = False,
     ):
         self.path = Path(path)
 
         self.depth_type = depth_type
         self.depth_max = depth_max
-        self.image_only = image_only
+        self.generate_rays = generate_rays
 
         # Load fnames
         self.image_fnames = get_image_files(
@@ -197,16 +197,13 @@ class ImageDataset(torch.utils.data.Dataset):
         normal_ims = []
         pbar = tqdm(range(len(self.image_fnames)))
         for i in pbar:
-            pbar.set_description(f"Loading {self.image_fnames[i]}")
+            pbar.set_description(f"Loading {self.image_fnames[i].name}")
             depth_ims.append(load_image(self.depth_fnames[i], "depth"))
-            print(depth_ims[0].dtype)
-            pbar.set_description(f"Loading {self.depth_fnames[i]}")
+            pbar.set_description(f"Loading {self.depth_fnames[i].name}")
             rgb_ims.append(load_image(self.image_fnames[i], "image"))
-            print(rgb_ims[0].dtype)
             if len(self.normal_fnames) > 0:
-                pbar.set_description(f"Loading {self.normal_fnames[i]}")
+                pbar.set_description(f"Loading {self.normal_fnames[i].name}")
                 normal_im = load_image(self.normal_fnames[i], "omni_normal")
-                print(normal_im.dtype)
                 normal_im = (normal_im - 0.5) * 2.0
                 normal_im = normal_im / np.linalg.norm(
                     normal_im, axis=-1, keepdims=True
@@ -250,7 +247,7 @@ class ImageDataset(torch.utils.data.Dataset):
         self.extrinsics = np.stack(extrinsics)
 
         # Generate rays
-        if self.image_only:
+        if not self.generate_rays:
             return
 
         yy, xx = np.meshgrid(np.arange(self.H), np.arange(self.W), indexing="ij")
@@ -314,14 +311,23 @@ class ImageDataset(torch.utils.data.Dataset):
             "intrinsic": self.intrinsic,
         }
 
+    def num_images(self):
+        return len(self.rgb_ims)
+
     def __len__(self):
+        if not self.generate_rays:
+            raise RuntimeError(
+                f"Cannot get number of rays from image-only dataset. Please use num_images() instead."
+                f"If you want to use rays, please set generate_rays=True when creating the dataset."
+            )
+
         return len(self.rays_d)
 
     def __getitem__(self, idx):
-        if self.image_only:
+        if not self.generate_rays:
             raise RuntimeError(
                 f"Cannot get rays {idx} from image-only dataset. Please use get_image({idx}) for images."
-                f"If you want to use rays, please set image_only=False when creating the dataset."
+                f"If you want to use rays, please set generate_rays=True when creating the dataset."
             )
 
         view_idx = idx // (self.H * self.W)
@@ -400,7 +406,10 @@ if __name__ == "__main__":
 
     if args.dataset == "image":
         dataset = ImageDataset(
-            args.path, depth_type=args.depth_type, normalize_scene=True
+            args.path,
+            depth_type=args.depth_type,
+            normalize_scene=True,
+            generate_rays=True,
         )
 
         batch_size = dataset.H * dataset.W

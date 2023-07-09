@@ -1,6 +1,7 @@
 # torch-ash
 torch-ash is the missing piece of collision-free extendable parallel spatial hashing for torch modules. It includes two paper's core implementations:
 
+[[PAMI 2022]](https://arxiv.org/abs/2110.00511) | [[CVPR 2023]](https://arxiv.org/abs/2305.13220)
 ```
 @article{dong2022ash,
   title={ASH: A modern framework for parallel spatial hashing in 3D perception},
@@ -24,7 +25,7 @@ torch-ash is the missing piece of collision-free extendable parallel spatial has
 </table>
 
 
-Note for a more user-friendly interface and further extensions, I have fully rewritten everything from scratch in this repo. Discrepancies from the reported results in the aforementioned papers are expected. More examples will come. 
+Note for a more user-friendly interface and further extensions, I have fully rewritten everything from scratch in this repo. Discrepancies from the reported results in the aforementioned papers are expected. Updates and more examples will come. 
 
 
 ## Install
@@ -63,8 +64,41 @@ It has two wrappers for coordinate transform, `UnboundedSparseDenseGrid` for pot
 
 The `SparseDenseGrid` does a good job without an MLP in fast reconstruction tasks (e.g. RGB-D fusion, differentiable volume rendering with a decent initialization), but with an MLP, there seems no advantages in comparison to Instant-NGP as of now. Potential extensions in this line are still in progress.
 
-### Usage
+### Demo: RGB-D fusion
+RGB-D fusion takes in posed RGB-D images and creates colorized mesh, raw and filtered. Here, depth can either be sensor depth, or generated from a monocular depth prediction model (e.g. [omnidata](https://github.com/theNded/mini-omnidata)) with calibrated scales via [COLMAP](https://colmap.github.io/). Example datasets can be downloaded at [Google Drive](https://drive.google.com/drive/folders/12E4cTIIxmShV_ENkcvzKOQunsa0TqDVQ?usp=drive_link). Instructions for custom datasets will be available soon.
+
+These datasets are organized by
+```
+- image/ # for RGB images [jpg|png]
+- depth/ # for sensor depth [optional, png]
+- omni_depth/ # for learned depth generated from RGB [npy]
+- depth_scales.txt # calculated between learned depth and SfM
+- omni_normal/ # for learned normals generated from RGB [optional, npy]
+- poses.txt
+- intrinsic.txt
+```
+
+To run the demo,
+```sh
+# Unbounded scenes, sensor depth
+python demo/rgbd_fusion.py --path /path/to/dataset/samples --voxel_size 0.015 --depth_type sensor
+
+# Bounded scenes, learned depth
+python demo/rgbd_fusion.py --path /path/to/dataset/samples --voxel_size 0.015 --depth_type learned
+```
+
+With learned depth, the fusion result is usually noisy. So a Gaussian filter can be applied to smooth the results.
+<table>
+  <tr>
+  <td><img src="https://github.com/theNded/torch-ash/assets/6127282/793ed2ce-7e8b-476d-a4ef-996230f82a27" width="480"/></td>
+  <td><img src="https://github.com/theNded/torch-ash/assets/6127282/f252b2f9-70c5-41fd-a94f-1c89f65dc9d1" width="480"/></td>
+  </tr>
+</table>
+
+### API Usage
 ---
+
+Here is a brief summary of basic usages, doc will be online soon.
 #### Allocation
 We first initialize a 3D sparse-dense grid with 10000 sparse grid blocks. Each sparse grid contains a dense 8^3=512 array of cells, whose size is 0.01m.
 ```python

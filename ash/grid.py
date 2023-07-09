@@ -607,7 +607,7 @@ class SparseDenseGrid(ASHModule):
         """
 
         if self.grid_coords is None or self.lut_grid_nb2grid_idx is None:
-            self.construct_sparse_neighbor_tables_()
+            self.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
 
         # Get active entries
         grid_coords, grid_indices = self.engine.items()
