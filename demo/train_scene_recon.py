@@ -4,13 +4,12 @@ import torch.nn.functional as F
 
 import nerfacc
 
-from ash import BoundedSparseDenseGrid
+from ash import UnBoundedSparseDenseGrid
 import numpy as np
 from tqdm import tqdm
 
 import open3d as o3d
 
-from ash import BoundedSparseDenseGrid
 from data_provider import ImageDataset, Dataloader
 
 from rgbd_fusion import TSDFFusion
@@ -31,20 +30,19 @@ class SDFToSigma(nn.Module):
 
 
 class PlainVoxels(nn.Module):
-    def __init__(self, device):
+    def __init__(self, voxel_size, device):
         super().__init__()
-        self.grid = BoundedSparseDenseGrid(
+        print(f'voxel_size={voxel_size}')
+        self.grid = UnBoundedSparseDenseGrid(
             in_dim=3,
             num_embeddings=40000,
             embedding_dim=5,
             grid_dim=8,
-            sparse_grid_dim=32,
-            bbox_min=-1 * torch.ones(3, device=device),
-            bbox_max=torch.ones(3, device=device),
+            cell_size=voxel_size,
             device=device,
         )
 
-        self.sdf_to_sigma = SDFToSigma(beta=0.01, device=device)
+        self.sdf_to_sigma = SDFToSigma(beta=voxel_size, device=device)
 
     def fuse_dataset(self, dataset, dilation):
         fuser = TSDFFusion(self.grid, dilation=dilation)
@@ -54,12 +52,7 @@ class PlainVoxels(nn.Module):
         print(f"hash map size after pruning: {self.grid.engine.size()}")
 
     def forward(self, rays_o, rays_d, rays_d_norm, near, far):
-        (
-            ray_indices,
-            t_nears,
-            t_fars,
-            prefix_sum_ray_samples,
-        ) = self.grid.ray_sample(
+        (ray_indices, t_nears, t_fars, prefix_sum_ray_samples,) = self.grid.ray_sample(
             rays_o=rays_o,
             rays_d=rays_d,
             t_min=near,
@@ -189,6 +182,7 @@ if __name__ == "__main__":
     # fmt: off
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", type=str, required=True)
+    parser.add_argument("--voxel_size", type=float, default=0.015)
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
     parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
     args = parser.parse_args()
@@ -199,13 +193,14 @@ if __name__ == "__main__":
         args.path,
         depth_type=args.depth_type,
         depth_max=args.depth_max,
-        normalize_scene=True,
+        normalize_scene=False,
         generate_rays=True,
     )
 
-    model = PlainVoxels(device=torch.device("cuda:0"))
-    dilation = 1 if args.depth_type == "sensor" else 2
+    model = PlainVoxels(voxel_size=args.voxel_size, device=torch.device("cuda:0"))
+    dilation = 2
     model.fuse_dataset(dataset, dilation)
+    model.grid.gaussian_filter_(7, 0.1)
     mesh = model.marching_cubes()
     o3d.visualization.draw([mesh])
 
@@ -214,15 +209,16 @@ if __name__ == "__main__":
     batches_per_image = pixel_count // batch_size
     assert pixel_count % batch_size == 0
 
-    eval_dataloader = Dataloader(
-        dataset, batch_size=batch_size, shuffle=False, device=torch.device("cuda:0")
-    )
+    # eval_dataloader = Dataloader(
+    #     dataset, batch_size=batch_size, shuffle=False, device=torch.device("cuda:0")
+    # )
 
     train_dataloader = Dataloader(
         dataset, batch_size=batch_size, shuffle=True, device=torch.device("cuda:0")
     )
 
-    optim = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optim = torch.optim.RMSprop(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9999)
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
@@ -233,7 +229,7 @@ if __name__ == "__main__":
         rays_o = datum["rays_o"]
         rays_d = datum["rays_d"]
         ray_norms = datum["rays_d_norm"]
-        result = model(rays_o, rays_d, ray_norms, near=0.1, far=1.4)
+        result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
 
         rgb_gt = datum["rgb"]
         normal_gt = datum["normal"]
@@ -263,9 +259,10 @@ if __name__ == "__main__":
         )
         optim.step()
 
-        if step % 1000 == 0 and step > 0:
+        if step % 500 == 0 and step > 0:
             mesh = model.marching_cubes()
             o3d.visualization.draw([mesh])
+            scheduler.step()
 
     # Evaluation
     for i in range(dataset.num_images):
