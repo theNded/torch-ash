@@ -16,23 +16,24 @@ from rgbd_fusion import TSDFFusion
 from depth_loss import ScaleAndShiftInvariantLoss
 
 
-class SDFToSigma(nn.Module):
-    def __init__(self, beta, device):
-        super().__init__()
-        self.beta = nn.Parameter(torch.tensor([beta], device=device))
+class SDFToDensity(nn.Module):
+    def __init__(self, min_beta=0.01, init_beta=1):
+        super(SDFToDensity, self).__init__()
+        self.min_beta = min_beta
+        self.beta = nn.Parameter(torch.Tensor([init_beta]))
 
     def forward(self, sdf):
-        beta = torch.clamp(self.beta, min=1e-4)
+        beta = self.min_beta + torch.abs(self.beta)
 
-        alpha = 1.0 / beta
-        sigma = (0.5 * alpha) * (1.0 + sdf.sign() * torch.expm1(-sdf.abs() / beta))
-        return sigma
+        alpha = 1 / beta
+        # https://github.com/lioryariv/volsdf/blob/main/code/model/density.py
+        return alpha * (0.5 + 0.5 * sdf.sign() * torch.expm1(-sdf.abs() / beta))
 
 
 class PlainVoxels(nn.Module):
     def __init__(self, voxel_size, device):
         super().__init__()
-        print(f'voxel_size={voxel_size}')
+        print(f"voxel_size={voxel_size}")
         self.grid = UnBoundedSparseDenseGrid(
             in_dim=3,
             num_embeddings=40000,
@@ -42,7 +43,15 @@ class PlainVoxels(nn.Module):
             device=device,
         )
 
-        self.sdf_to_sigma = SDFToSigma(beta=voxel_size, device=device)
+        self.sdf_to_sigma = SDFToDensity(
+            min_beta=voxel_size, init_beta=2 * voxel_size
+        ).to(device)
+
+    def parameters(self):
+        return [
+            {"params": self.grid.parameters()},
+            {"params": self.sdf_to_sigma.parameters(), "lr": 1e-4},
+        ]
 
     def fuse_dataset(self, dataset, dilation):
         fuser = TSDFFusion(self.grid, dilation=dilation)
@@ -70,7 +79,6 @@ class PlainVoxels(nn.Module):
 
         # Used for filtering out empty voxels
         voxel_weights = embeddings[..., 4:5]
-        masks = masks & (voxel_weights >= 1.0).squeeze()
 
         valid_ray_indices = ray_indices[masks]
         valid_t_nears = t_nears[masks]
@@ -204,14 +212,14 @@ if __name__ == "__main__":
     mesh = model.marching_cubes()
     o3d.visualization.draw([mesh])
 
-    batch_size = 2048
+    batch_size = 4096
     pixel_count = dataset.H * dataset.W
     batches_per_image = pixel_count // batch_size
     assert pixel_count % batch_size == 0
 
-    # eval_dataloader = Dataloader(
-    #     dataset, batch_size=batch_size, shuffle=False, device=torch.device("cuda:0")
-    # )
+    eval_dataloader = Dataloader(
+        dataset, batch_size=batch_size, shuffle=False, device=torch.device("cuda:0")
+    )
 
     train_dataloader = Dataloader(
         dataset, batch_size=batch_size, shuffle=True, device=torch.device("cuda:0")
@@ -237,7 +245,8 @@ if __name__ == "__main__":
 
         rgb_loss = F.mse_loss(result["rgb"], rgb_gt)
         normal_loss = (
-            1 - F.cosine_similarity(result["normal"], normal_gt, dim=-1).mean()
+            0.5 * ((result["normal"] - normal_gt).abs().sum(dim=1)).mean()
+            + 0.5 * (1 - (result["normal"] * normal_gt).sum(dim=1)).abs().mean()
         )
         depth_loss = depth_loss_fn(
             result["depth"].view(-1, 32, 32),
@@ -247,7 +256,16 @@ if __name__ == "__main__":
 
         eikonal_loss = (torch.norm(result["sdf_grads"], dim=-1) - 1).abs().mean()
 
-        loss = rgb_loss + 0.1 * normal_loss + 0.1 * depth_loss + 0.1 * eikonal_loss
+        uniform_samples = model.grid.uniform_sample(batch_size)
+        uniform_sdf_grads = model.grad_fn(uniform_samples)
+        uniform_eikonal_loss = (torch.norm(uniform_sdf_grads, dim=-1) - 1).abs().mean()
+
+        loss = (
+            rgb_loss
+            + 0.1 * normal_loss
+            + 0.1 * depth_loss
+            + 0.1 * (eikonal_loss + uniform_eikonal_loss)
+        )
 
         loss.backward()
         pbar.set_description(
@@ -259,40 +277,54 @@ if __name__ == "__main__":
         )
         optim.step()
 
-        if step % 500 == 0 and step > 0:
+        if step % 500 == 0:
             mesh = model.marching_cubes()
-            o3d.visualization.draw([mesh])
+            uniform_samples = model.grid.uniform_sample(10000)
+            uniform_pcd = o3d.t.geometry.PointCloud(
+                uniform_samples.detach().cpu().numpy()
+            )
+            o3d.visualization.draw([mesh, uniform_pcd])
             scheduler.step()
 
-    # Evaluation
-    for i in range(dataset.num_images):
-        im_rgbs = []
-        im_weights = []
-        im_depths = []
-        im_normals = []
+            # Evaluation
+            # for i in range(dataset.num_images):
+            #     im_rgbs = []
+            #     im_weights = []
+            #     im_depths = []
+            #     im_normals = []
 
-        for b in range(batches_per_image):
-            datum = next(iter(eval_dataloader))
-            rays_o = datum["rays_o"]
-            rays_d = datum["rays_d"]
-            ray_norms = datum["rays_d_norm"]
-            result = model(rays_o, rays_d, ray_norms, near=0.1, far=1.4)
+            #     for b in range(batches_per_image):
+            #         datum = next(iter(eval_dataloader))
+            #         rays_o = datum["rays_o"]
+            #         rays_d = datum["rays_d"]
+            #         ray_norms = datum["rays_d_norm"]
+            #         result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
 
-            im_rgbs.append(result["rgb"].detach().cpu().numpy())
-            im_weights.append(result["weights"].detach().cpu().numpy())
-            im_depths.append(result["depth"].detach().cpu().numpy())
-            im_normals.append(result["normal"].detach().cpu().numpy())
+            #         im_rgbs.append(result["rgb"].detach().cpu().numpy())
+            #         im_weights.append(result["weights"].detach().cpu().numpy())
+            #         im_depths.append(result["depth"].detach().cpu().numpy())
+            #         im_normals.append(result["normal"].detach().cpu().numpy())
 
-        im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(dataset.H, dataset.W, 3)
-        im_weights = np.concatenate(im_weights, axis=0).reshape(dataset.H, dataset.W, 1)
-        im_depths = np.concatenate(im_depths, axis=0).reshape(dataset.H, dataset.W, 1)
-        im_normals = np.concatenate(im_normals, axis=0).reshape(dataset.H, dataset.W, 3)
+            #     im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
+            #         dataset.H, dataset.W, 3
+            #     )
+            #     im_weights = np.concatenate(im_weights, axis=0).reshape(
+            #         dataset.H, dataset.W, 1
+            #     )
+            #     im_depths = np.concatenate(im_depths, axis=0).reshape(
+            #         dataset.H, dataset.W, 1
+            #     )
+            #     im_normals = np.concatenate(im_normals, axis=0).reshape(
+            #         dataset.H, dataset.W, 3
+            #     )
 
-        import matplotlib.pyplot as plt
+            #     import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(2, 2)
-        axes[0, 0].imshow(im_rgbs)
-        axes[0, 1].imshow(im_weights)
-        axes[1, 0].imshow(im_depths)
-        axes[1, 1].imshow(im_normals)
-        plt.show()
+            #     fig, axes = plt.subplots(2, 2)
+            #     axes[0, 0].imshow(im_rgbs)
+            #     axes[0, 1].imshow(im_weights)
+            #     axes[1, 0].imshow(im_depths)
+            #     axes[1, 1].imshow(im_normals)
+            #     plt.show()
+
+            #     break
