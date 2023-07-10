@@ -76,6 +76,7 @@ class PlainVoxels(nn.Module):
 
         x.requires_grad_(True)
         embeddings, masks = self.grid(x, interpolation="linear")
+        # import ipdb; ipdb.set_trace()
 
         # Used for filtering out empty voxels
         voxel_weights = embeddings[..., 4:5]
@@ -86,7 +87,7 @@ class PlainVoxels(nn.Module):
         valid_t_mids = t_mid[masks]
 
         # Could optimize a bit
-        embeddings = embeddings[masks]
+        # embeddings = embeddings[masks]
         sdfs = embeddings[..., 0:1].contiguous()
         rgbs = embeddings[..., 1:4].contiguous()
         sdf_grads = torch.autograd.grad(
@@ -95,8 +96,12 @@ class PlainVoxels(nn.Module):
             grad_outputs=torch.ones_like(sdfs, requires_grad=False),
             create_graph=True,
         )[0]
+
+        sdfs = sdfs[masks]
+        rgbs = rgbs[masks]
         sdf_grads = sdf_grads[masks]
         normals = F.normalize(sdf_grads, dim=-1)
+        #print(f'normals.shape={normals.shape}, {normals}')
         sigmas = self.sdf_to_sigma(sdfs)
 
         weights = nerfacc.render_weight_from_density(
@@ -137,6 +142,7 @@ class PlainVoxels(nn.Module):
             values=None,
             n_rays=len(rays_o),
         )
+        #print(f'rendered_normals.shape={rendered_normals.shape}: {rendered_normals}')
 
         return {
             "rgb": rendered_rgb,
@@ -208,7 +214,7 @@ if __name__ == "__main__":
     model = PlainVoxels(voxel_size=args.voxel_size, device=torch.device("cuda:0"))
     dilation = 2
     model.fuse_dataset(dataset, dilation)
-    model.grid.gaussian_filter_(7, 0.1)
+    model.grid.gaussian_filter_(7, 1)
     mesh = model.marching_cubes()
     o3d.visualization.draw([mesh])
 
@@ -244,6 +250,7 @@ if __name__ == "__main__":
         depth_gt = datum["depth"]
 
         rgb_loss = F.mse_loss(result["rgb"], rgb_gt)
+        #print(f'result[normal].shape={result["normal"].shape}, normal_gt.shape={normal_gt.shape}')
         normal_loss = (
             0.5 * ((result["normal"] - normal_gt).abs().sum(dim=1)).mean()
             + 0.5 * (1 - (result["normal"] * normal_gt).sum(dim=1)).abs().mean()
@@ -279,14 +286,11 @@ if __name__ == "__main__":
 
         if step % 500 == 0:
             mesh = model.marching_cubes()
-            uniform_samples = model.grid.uniform_sample(10000)
-            uniform_pcd = o3d.t.geometry.PointCloud(
-                uniform_samples.detach().cpu().numpy()
-            )
-            o3d.visualization.draw([mesh, uniform_pcd])
+            o3d.visualization.draw([mesh])
             scheduler.step()
 
-            # Evaluation
+
+            # # Evaluation
             # for i in range(dataset.num_images):
             #     im_rgbs = []
             #     im_weights = []
@@ -302,7 +306,7 @@ if __name__ == "__main__":
 
             #         im_rgbs.append(result["rgb"].detach().cpu().numpy())
             #         im_weights.append(result["weights"].detach().cpu().numpy())
-            #         im_depths.append(result["depth"].detach().cpu().numpy())
+            #         im_depths.append(datum["normal"].detach().cpu().numpy())
             #         im_normals.append(result["normal"].detach().cpu().numpy())
 
             #     im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
@@ -312,7 +316,7 @@ if __name__ == "__main__":
             #         dataset.H, dataset.W, 1
             #     )
             #     im_depths = np.concatenate(im_depths, axis=0).reshape(
-            #         dataset.H, dataset.W, 1
+            #         dataset.H, dataset.W, 3
             #     )
             #     im_normals = np.concatenate(im_normals, axis=0).reshape(
             #         dataset.H, dataset.W, 3
@@ -323,8 +327,8 @@ if __name__ == "__main__":
             #     fig, axes = plt.subplots(2, 2)
             #     axes[0, 0].imshow(im_rgbs)
             #     axes[0, 1].imshow(im_weights)
-            #     axes[1, 0].imshow(im_depths)
-            #     axes[1, 1].imshow(im_normals)
+            #     axes[1, 0].imshow((im_depths + 1) * 0.5)
+            #     axes[1, 1].imshow((im_normals + 1) * 0.5)
             #     plt.show()
 
             #     break
