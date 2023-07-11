@@ -101,7 +101,7 @@ class PlainVoxels(nn.Module):
         rgbs = rgbs[masks]
         sdf_grads = sdf_grads[masks]
         normals = F.normalize(sdf_grads, dim=-1)
-        #print(f'normals.shape={normals.shape}, {normals}')
+        # print(f'normals.shape={normals.shape}, {normals}')
         sigmas = self.sdf_to_sigma(sdfs)
 
         weights = nerfacc.render_weight_from_density(
@@ -142,7 +142,7 @@ class PlainVoxels(nn.Module):
             values=None,
             n_rays=len(rays_o),
         )
-        #print(f'rendered_normals.shape={rendered_normals.shape}: {rendered_normals}')
+        # print(f'rendered_normals.shape={rendered_normals.shape}: {rendered_normals}')
 
         return {
             "rgb": rendered_rgb,
@@ -165,6 +165,39 @@ class PlainVoxels(nn.Module):
             weight_thr=0.5,
         )
         return mesh
+
+    def occupancy_lineset(self, color=[0, 0, 1], scale=1.0):
+        xyz000, _, _, _ = self.grid.items()
+        xyz000 = xyz000.view(-1, 3)
+
+        block_len = self.grid.cell_size * self.grid.grid_dim
+
+        xyz000 = xyz000.cpu().numpy() * block_len
+        xyz001 = xyz000 + np.array([[block_len * scale, 0, 0]])
+        xyz010 = xyz000 + np.array([[0, block_len * scale, 0]])
+        xyz100 = xyz000 + np.array([[0, 0, block_len * scale]])
+        xyz = np.concatenate((xyz000, xyz001, xyz010, xyz100), axis=0).astype(
+            np.float32
+        )
+
+        lineset = o3d.t.geometry.LineSet()
+        lineset.point["positions"] = o3d.core.Tensor(xyz)
+
+        n = len(xyz000)
+        lineset000 = np.arange(0, n)
+        lineset001 = np.arange(n, 2 * n)
+        lineset010 = np.arange(2 * n, 3 * n)
+        lineset100 = np.arange(3 * n, 4 * n)
+
+        indices001 = np.stack((lineset000, lineset001), axis=1)
+        indices010 = np.stack((lineset000, lineset010), axis=1)
+        indices100 = np.stack((lineset000, lineset100), axis=1)
+        indices = np.concatenate((indices001, indices010, indices100), axis=0)
+
+        lineset.line["indices"] = o3d.core.Tensor(indices.astype(np.int32))
+        colors = np.tile(color, (3 * n, 1))
+        lineset.line["colors"] = o3d.core.Tensor(colors.astype(np.float32))
+        return lineset
 
     def color_fn(self, x):
         embeddings, masks = self.grid(x, interpolation="linear")
@@ -216,7 +249,7 @@ if __name__ == "__main__":
     model.fuse_dataset(dataset, dilation)
     model.grid.gaussian_filter_(7, 1)
     mesh = model.marching_cubes()
-    o3d.visualization.draw([mesh])
+    o3d.visualization.draw([mesh, model.occupancy_lineset()])
 
     batch_size = 4096
     pixel_count = dataset.H * dataset.W
@@ -250,7 +283,7 @@ if __name__ == "__main__":
         depth_gt = datum["depth"]
 
         rgb_loss = F.mse_loss(result["rgb"], rgb_gt)
-        #print(f'result[normal].shape={result["normal"].shape}, normal_gt.shape={normal_gt.shape}')
+        # print(f'result[normal].shape={result["normal"].shape}, normal_gt.shape={normal_gt.shape}')
         normal_loss = (
             0.5 * ((result["normal"] - normal_gt).abs().sum(dim=1)).mean()
             + 0.5 * (1 - (result["normal"] * normal_gt).sum(dim=1)).abs().mean()
@@ -288,7 +321,6 @@ if __name__ == "__main__":
             mesh = model.marching_cubes()
             o3d.visualization.draw([mesh])
             scheduler.step()
-
 
             # # Evaluation
             # for i in range(dataset.num_images):
