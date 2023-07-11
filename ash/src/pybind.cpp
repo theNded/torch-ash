@@ -33,5 +33,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
     m.def("convolution_forward", &convolution_forward, "Convolution forward");
 
+    m.def("ray_find_near_far", &ray_find_near_far, "Ray find near far");
     m.def("ray_sample", &ray_sample, "Ray sample");
 }

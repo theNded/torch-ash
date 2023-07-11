@@ -376,6 +376,32 @@ class SparseDenseGrid(ASHModule):
             ray_prefix_sum,
         )
 
+    @torch.no_grad()
+    def ray_find_near_far(
+        self,
+        rays_o: torch.Tensor,
+        rays_d: torch.Tensor,
+        t_min: float,
+        t_max: float,
+        t_step: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample the sparse-dense grid along rays."""
+        bbox_min, bbox_max = self.get_bbox()
+
+        ray_nears, ray_fars = backend.ray_find_near_far(
+            self.engine.backend,
+            self.transform_world_to_cell(rays_o),
+            rays_d,
+            self.transform_world_to_cell(bbox_min),
+            self.transform_world_to_cell(bbox_max),
+            t_min / self.cell_size,
+            t_max / self.cell_size,
+            t_step / self.cell_size,
+            float(self.grid_dim),
+        )
+
+        return (ray_nears * self.cell_size, ray_fars * self.cell_size)
+
     def uniform_sample(
         self, num_samples: int, space: Literal["occupied", "empty"] = "occupied"
     ) -> torch.Tensor:

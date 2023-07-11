@@ -4,6 +4,124 @@
 #include "minivec.h"
 #include "sampler.h"
 
+__global__ void ray_find_near_far_kernel(
+        stdgpu::unordered_map<MiniVec<int, 3>,
+                              int,
+                              MiniVecHash<int, 3>,
+                              MiniVecEq<int, 3>> map,
+        const MiniVec<float, 3>* ray_origins,
+        const MiniVec<float, 3>* ray_directions,
+        const MiniVec<float, 3>* bbox_min,
+        const MiniVec<float, 3>* bbox_max,
+        float* ray_nears,
+        float* ray_fars,
+        const float t_min,
+        const float t_max,
+        const float t_step,
+        const float grid2cell_multiplier,
+        const int len) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= len) {
+        return;
+    }
+
+    auto xyz_min = bbox_min[0];
+    auto xyz_max = bbox_max[0];
+
+    auto ray_o = ray_origins[idx];
+    auto ray_d = ray_directions[idx];
+
+    const float cell2grid_multiplier = 1.0 / grid2cell_multiplier;
+
+    const float t_cell_step = t_step;
+    const float t_grid_step = t_step * grid2cell_multiplier * 0.5;
+
+    float near = -1;
+    float far = t_max;
+    float t = t_min;
+
+    // Coarse estimate
+    while (t < t_max) {
+        auto xyz_cell = ray_o + t * ray_d;
+
+        // Bound check
+        bool in_bound = true;
+        for (int d = 0; d < 3; ++d) {
+            in_bound = in_bound &&
+                       (xyz_cell[d] >= xyz_min[d] && xyz_cell[d] <= xyz_max[d]);
+        }
+        if (!in_bound) break;
+
+        // Empty check
+        auto xyz_grid = floor((xyz_cell * cell2grid_multiplier)).cast<int>();
+        auto it = map.find(xyz_grid);
+        if (it == map.end()) {
+            t += t_grid_step;
+            continue;
+        }
+
+        // Valid sample exists -- assign near
+        // If this line is never reached, mark near as -1, indicating no
+        // valid sample exists along this ray.
+        near = (near < 0) ? t : max(near - t_grid_step, t_min);
+        far = min(t + t_grid_step, t_max);
+
+        t += t_grid_step;
+    }
+    ray_nears[idx] = near;
+    ray_fars[idx] = far;
+}
+
+std::tuple<at::Tensor, at::Tensor> ray_find_near_far(
+        const HashMap& hashmap,
+        const at::Tensor& ray_origins,
+        const at::Tensor& ray_directions,
+        const at::Tensor& bbox_min,
+        const at::Tensor& bbox_max,
+        const float t_min,
+        const float t_max,
+        const float t_step,
+        const float grid2cell_multiplier) {
+    // Ray sample is for 3D hash map only
+
+    using key_t = MiniVec<int, 3>;
+    using eq_t = MiniVecEq<int, 3>;
+    using hash_t = MiniVecHash<int, 3>;
+
+    auto hashmap_impl =
+            std::dynamic_pointer_cast<HashMapGPUImpl<key_t, hash_t, eq_t>>(
+                    hashmap.impl_);
+    if (hashmap_impl == nullptr) {
+        AT_ERROR(
+                "hashmap is not a GPU hashmap of type <int, 3>, ray sample not "
+                "supported");
+    }
+
+    stdgpu::unordered_map<key_t, int, hash_t, eq_t> map =
+            hashmap_impl->backend_;
+
+    int len = ray_origins.size(0);
+    int block_size = 1024;
+    int grid_size = (len + block_size - 1) / block_size;
+
+    auto float_options = at::TensorOptions()
+                                 .dtype(torch::kFloat32)
+                                 .device(ray_origins.device());
+
+    at::Tensor ray_nears = at::zeros({len}, float_options);
+    at::Tensor ray_fars = at::zeros({len}, float_options);
+    ray_find_near_far_kernel<<<block_size, grid_size>>>(
+            map, static_cast<MiniVec<float, 3>*>(ray_origins.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(ray_directions.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(bbox_min.data_ptr()),
+            static_cast<MiniVec<float, 3>*>(bbox_max.data_ptr()),
+            ray_nears.data_ptr<float>(), ray_fars.data_ptr<float>(), t_min,
+            t_max, t_step, grid2cell_multiplier, len);
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
+
+    return std::make_tuple(ray_nears, ray_fars);
+}
+
 __global__ void ray_sample_count_kernel(
         stdgpu::unordered_map<MiniVec<int, 3>,
                               int,

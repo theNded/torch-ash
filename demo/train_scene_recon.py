@@ -61,6 +61,14 @@ class PlainVoxels(nn.Module):
         print(f"hash map size after pruning: {self.grid.engine.size()}")
 
     def forward(self, rays_o, rays_d, rays_d_norm, near, far):
+        (ray_nears, ray_fars) = self.grid.ray_find_near_far(
+            rays_o=rays_o,
+            rays_d=rays_d,
+            t_min=near,
+            t_max=far,
+            t_step=0.01,
+        )
+
         (ray_indices, t_nears, t_fars, prefix_sum_ray_samples,) = self.grid.ray_sample(
             rays_o=rays_o,
             rays_d=rays_d,
@@ -127,6 +135,11 @@ class PlainVoxels(nn.Module):
             values=valid_t_mids,
             n_rays=len(rays_o),
         )
+        ray_nears = ray_nears.view(-1, 1) / rays_d_norm
+        ray_fars = ray_fars.view(-1, 1) / rays_d_norm
+        print(ray_nears.shape, ray_fars.shape)
+        print(ray_nears.min(), ray_nears.max())
+        print(ray_fars.min(), ray_fars.max())
         rendered_depth = rendered_depth / rays_d_norm
 
         rendered_normals = nerfacc.accumulate_along_rays(
@@ -150,6 +163,8 @@ class PlainVoxels(nn.Module):
             "normal": rendered_normals,
             "weights": accumulated_weights,
             "sdf_grads": sdf_grads,
+            "nears": ray_nears,
+            "fars": ray_fars,
         }
 
     def marching_cubes(self):
@@ -249,7 +264,7 @@ if __name__ == "__main__":
     model.fuse_dataset(dataset, dilation)
     model.grid.gaussian_filter_(7, 1)
     mesh = model.marching_cubes()
-    o3d.visualization.draw([mesh, model.occupancy_lineset()])
+    # o3d.visualization.draw([mesh, model.occupancy_lineset()])
 
     batch_size = 4096
     pixel_count = dataset.H * dataset.W
@@ -319,48 +334,48 @@ if __name__ == "__main__":
 
         if step % 500 == 0:
             mesh = model.marching_cubes()
-            o3d.visualization.draw([mesh])
+            # o3d.visualization.draw([mesh])
             scheduler.step()
 
-            # # Evaluation
-            # for i in range(dataset.num_images):
-            #     im_rgbs = []
-            #     im_weights = []
-            #     im_depths = []
-            #     im_normals = []
+            # Evaluation
+            for i in range(dataset.num_images):
+                im_rgbs = []
+                im_weights = []
+                im_depths = []
+                im_normals = []
 
-            #     for b in range(batches_per_image):
-            #         datum = next(iter(eval_dataloader))
-            #         rays_o = datum["rays_o"]
-            #         rays_d = datum["rays_d"]
-            #         ray_norms = datum["rays_d_norm"]
-            #         result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
+                for b in range(batches_per_image):
+                    datum = next(iter(eval_dataloader))
+                    rays_o = datum["rays_o"]
+                    rays_d = datum["rays_d"]
+                    ray_norms = datum["rays_d_norm"]
+                    result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
 
-            #         im_rgbs.append(result["rgb"].detach().cpu().numpy())
-            #         im_weights.append(result["weights"].detach().cpu().numpy())
-            #         im_depths.append(datum["normal"].detach().cpu().numpy())
-            #         im_normals.append(result["normal"].detach().cpu().numpy())
+                    im_rgbs.append(result["rgb"].detach().cpu().numpy())
+                    im_weights.append(result["weights"].detach().cpu().numpy())
+                    im_depths.append(result["nears"].detach().cpu().numpy())
+                    im_normals.append(result["fars"].detach().cpu().numpy())
 
-            #     im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
-            #         dataset.H, dataset.W, 3
-            #     )
-            #     im_weights = np.concatenate(im_weights, axis=0).reshape(
-            #         dataset.H, dataset.W, 1
-            #     )
-            #     im_depths = np.concatenate(im_depths, axis=0).reshape(
-            #         dataset.H, dataset.W, 3
-            #     )
-            #     im_normals = np.concatenate(im_normals, axis=0).reshape(
-            #         dataset.H, dataset.W, 3
-            #     )
+                im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
+                    dataset.H, dataset.W, 3
+                )
+                im_weights = np.concatenate(im_weights, axis=0).reshape(
+                    dataset.H, dataset.W, 1
+                )
+                im_depths = np.concatenate(im_depths, axis=0).reshape(
+                    dataset.H, dataset.W, 1
+                )
+                im_normals = np.concatenate(im_normals, axis=0).reshape(
+                    dataset.H, dataset.W, 1
+                )
 
-            #     import matplotlib.pyplot as plt
+                import matplotlib.pyplot as plt
 
-            #     fig, axes = plt.subplots(2, 2)
-            #     axes[0, 0].imshow(im_rgbs)
-            #     axes[0, 1].imshow(im_weights)
-            #     axes[1, 0].imshow((im_depths + 1) * 0.5)
-            #     axes[1, 1].imshow((im_normals + 1) * 0.5)
-            #     plt.show()
+                fig, axes = plt.subplots(2, 2)
+                axes[0, 0].imshow(im_rgbs)
+                axes[0, 1].imshow(im_weights)
+                axes[1, 0].imshow((im_depths))
+                axes[1, 1].imshow((im_normals))
+                plt.show()
 
-            #     break
+                break
