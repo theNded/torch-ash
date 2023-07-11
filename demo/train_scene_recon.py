@@ -56,7 +56,7 @@ class PlainVoxels(nn.Module):
     def fuse_dataset(self, dataset, dilation):
         fuser = TSDFFusion(self.grid, dilation=dilation)
         fuser.fuse_dataset(dataset)
-        fuser.prune_(0.5)
+        fuser.prune_by_mesh_connected_components_(ratio_to_largest_component=0.5)
 
         print(f"hash map size after pruning: {self.grid.engine.size()}")
 
