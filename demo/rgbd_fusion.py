@@ -5,7 +5,7 @@ from torch.utils.dlpack import from_dlpack, to_dlpack
 
 import nerfacc
 
-from ash import UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict
+from ash import HashSet, UnBoundedSparseDenseGrid, BoundedSparseDenseGrid, DotDict
 import numpy as np
 from tqdm import tqdm
 
@@ -33,7 +33,9 @@ class TSDFFusion:
     device = torch.device("cuda:0")
 
     def __init__(
-        self, grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid], dilation: int
+        self,
+        grid: Union[UnBoundedSparseDenseGrid, BoundedSparseDenseGrid],
+        dilation: int,
     ):
         self.grid = grid
         self.voxel_size = self.grid.cell_size
@@ -108,7 +110,7 @@ class TSDFFusion:
         return sdf, rgb, weight
 
     @torch.no_grad()
-    def prune_(self, grid_mean_weight_thr=1):
+    def prune_by_weight_(self, grid_mean_weight_thr=1):
         grid_coords, cell_coords, grid_indices, cell_indices = self.grid.items()
 
         batch_size = min(1000, len(grid_coords))
@@ -124,6 +126,75 @@ class TSDFFusion:
                 self.grid.engine.erase(grid_coords_batch[mask].squeeze(1))
                 self.grid.embeddings[grid_indices_batch[mask]] = 0
         self.grid.construct_grid_neighbor_lut_(radius=1, bidirectional=False)
+
+    @torch.no_grad()
+    def prune_by_mesh_connected_components_(self, ratio_to_largest_component=0.5):
+        torch.cuda.empty_cache()
+
+        sdf = self.grid.embeddings[..., 0].contiguous()
+        weight = self.grid.embeddings[..., 4].contiguous()
+        mesh = self.grid.marching_cubes(
+            sdf,
+            weight,
+            vertices_only=False,
+            color_fn=None,
+            normal_fn=None,
+            iso_value=0.0,
+            weight_thr=1,
+        )
+        mesh = mesh.to_legacy()
+
+        # Remove small connected components in mesh
+        (
+            triangle_clusters,
+            cluster_n_triangles,
+            cluster_area,
+        ) = mesh.cluster_connected_triangles()
+
+        triangle_clusters = np.array(triangle_clusters)
+        cluster_n_triangles = np.array(cluster_n_triangles)
+        largest_cluster_idx = cluster_n_triangles.argmax()
+        largest_cluster_n_triangles = cluster_n_triangles[largest_cluster_idx]
+
+        triangles_keep_mask = np.zeros_like(triangle_clusters, dtype=np.int32)
+        saved_clusters = []
+        for i, n_tri in enumerate(cluster_n_triangles):
+            if n_tri > ratio_to_largest_component * largest_cluster_n_triangles:
+                saved_clusters.append(i)
+                triangles_keep_mask += triangle_clusters == i
+        triangles_to_remove = triangles_keep_mask == 0
+        mesh.remove_triangles_by_mask(triangles_to_remove)
+        mesh.remove_unreferenced_vertices()
+
+        # Only keep sparse grids around surfaces
+        xyz = torch.from_numpy(np.asarray(mesh.vertices)).to(self.device)
+
+        dummy_grid = UnBoundedSparseDenseGrid(
+            in_dim=3,
+            num_embeddings=self.grid.num_embeddings,
+            embedding_dim=1,  # dummy
+            grid_dim=self.grid.grid_dim,
+            cell_size=self.grid.cell_size,
+            device=self.grid.device,
+        )
+        # Use a small dilation around
+        dummy_grid.spatial_init_(xyz, dilation=1, bidirectional=True)
+
+        # Find the portion that need to be removed
+        grid_coords_unpruned, _, _, _ = self.grid.items()
+        grid_coords_kept, _, _, _ = dummy_grid.items()
+        grid_coords_unpruned = grid_coords_unpruned.view(-1, 3)
+        grid_coords_kept = grid_coords_kept.view(-1, 3)
+
+        hashset = HashSet(
+            key_dim=3, capacity=int(len(grid_coords_unpruned) * 1.2), device=self.device
+        )
+        hashset.insert(grid_coords_kept)
+        masks = hashset.find(grid_coords_unpruned)
+        grid_coords_to_prune = grid_coords_unpruned[~masks]
+
+        self.grid.engine.erase(grid_coords_to_prune)
+        print("after pruning:", self.grid.engine.size())
 
     @torch.no_grad()
     def fuse_frame(self, datum):
@@ -279,8 +350,11 @@ if __name__ == "__main__":
         color_fn=color_fn,
         normal_fn=normal_fn,
         iso_value=0.0,
-        weight_thr=2,
+        weight_thr=1,
     )
+    o3d.io.write_triangle_mesh("mesh.ply", mesh.to_legacy())
+
+    fuser.prune_by_mesh_connected_components_(ratio_to_largest_component=0.5)
 
     # 7x7x7 gaussian filter
     fuser.grid.gaussian_filter_(size=7, sigma=0.1)
@@ -294,7 +368,7 @@ if __name__ == "__main__":
         color_fn=color_fn,
         normal_fn=normal_fn,
         iso_value=0.0,
-        weight_thr=2,
+        weight_thr=1,
     )
     o3d.visualization.draw([mesh, mesh_filtered])
 

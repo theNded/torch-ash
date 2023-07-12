@@ -25,6 +25,7 @@ General dtype rules:
 - indices: long
 """
 
+
 class SparseDenseGrid(ASHModule):
     """
     Create a sparse-dense grid, where each [grid] is a dense array of [cells].
@@ -323,9 +324,9 @@ class SparseDenseGrid(ASHModule):
         self,
         rays_o: torch.Tensor,
         rays_d: torch.Tensor,
-        t_min: float,
-        t_max: float,
-        t_step: float,
+        rays_near: float,
+        rays_far: float,
+        max_samples_per_ray: int,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Sample the sparse-dense grid along rays.
         Args:
@@ -360,11 +361,11 @@ class SparseDenseGrid(ASHModule):
             self.engine.backend,
             self.transform_world_to_cell(rays_o),
             rays_d,
+            rays_near / self.cell_size,
+            rays_far / self.cell_size,
             self.transform_world_to_cell(bbox_min),
             self.transform_world_to_cell(bbox_max),
-            t_min / self.cell_size,
-            t_max / self.cell_size,
-            t_step / self.cell_size,
+            max_samples_per_ray,
             float(self.grid_dim),
         )
 
@@ -374,6 +375,32 @@ class SparseDenseGrid(ASHModule):
             t_fars * self.cell_size,
             ray_prefix_sum,
         )
+
+    @torch.no_grad()
+    def ray_find_near_far(
+        self,
+        rays_o: torch.Tensor,
+        rays_d: torch.Tensor,
+        t_min: float,
+        t_max: float,
+        t_step: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample the sparse-dense grid along rays."""
+        bbox_min, bbox_max = self.get_bbox()
+
+        ray_nears, ray_fars = backend.ray_find_near_far(
+            self.engine.backend,
+            self.transform_world_to_cell(rays_o),
+            rays_d,
+            self.transform_world_to_cell(bbox_min),
+            self.transform_world_to_cell(bbox_max),
+            t_min / self.cell_size,
+            t_max / self.cell_size,
+            t_step / self.cell_size,
+            float(self.grid_dim),
+        )
+
+        return (ray_nears * self.cell_size, ray_fars * self.cell_size)
 
     def uniform_sample(
         self, num_samples: int, space: Literal["occupied", "empty"] = "occupied"
@@ -385,7 +412,22 @@ class SparseDenseGrid(ASHModule):
         Returns:
             samples: (num_samples, in_dim) tensor of samples
         """
-        raise NotImplementedError("uniform_sample not implemented")
+        active_grid_coords, _ = self.engine.items()
+
+        if space == "occupied":
+            grid_indices = torch.randint(
+                len(active_grid_coords), (num_samples,), device=self.device
+            )
+            grid_coords = active_grid_coords[grid_indices].float()
+            cell_coords = torch.rand(num_samples, self.in_dim, device=self.device)
+
+            point_coords = self.transform_cell_to_world(
+                (grid_coords + cell_coords) * self.grid_dim
+            )
+            return point_coords
+
+        elif space == "empty":
+            raise NotImplementedError("empty space sampling not implemented")
 
     ###
     # Convolution/filter for sparse-dense structure
