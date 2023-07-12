@@ -9,6 +9,7 @@ import numpy as np
 from tqdm import tqdm
 
 import open3d as o3d
+from torch.utils.tensorboard import SummaryWriter
 
 from data_provider import ImageDataset, Dataloader
 
@@ -44,7 +45,7 @@ class PlainVoxels(nn.Module):
         )
 
         self.sdf_to_sigma = SDFToDensity(
-            min_beta=voxel_size, init_beta=2 * voxel_size
+            min_beta=voxel_size, init_beta=voxel_size * 2
         ).to(device)
 
     def parameters(self):
@@ -60,7 +61,7 @@ class PlainVoxels(nn.Module):
 
         print(f"hash map size after pruning: {self.grid.engine.size()}")
 
-    def forward(self, rays_o, rays_d, rays_d_norm, near, far):
+    def forward(self, rays_o, rays_d, rays_d_norm, near, far, jitter=None):
         (rays_near, rays_far) = self.grid.ray_find_near_far(
             rays_o=rays_o,
             rays_d=rays_d,
@@ -74,8 +75,11 @@ class PlainVoxels(nn.Module):
             rays_d=rays_d,
             rays_near=rays_near,
             rays_far=rays_far,
-            max_samples_per_ray=96,
+            max_samples_per_ray=64,
         )
+        if jitter is not None:
+            t_nears += jitter[..., 0:1]
+            t_fars += jitter[..., 1:2]
 
         t_nears = t_nears.view(-1, 1)
         t_fars = t_fars.view(-1, 1)
@@ -87,17 +91,12 @@ class PlainVoxels(nn.Module):
         # import ipdb; ipdb.set_trace()
 
         # Used for filtering out empty voxels
-        voxel_weights = embeddings[..., 4:5]
-
-        valid_ray_indices = ray_indices[masks]
-        valid_t_nears = t_nears[masks]
-        valid_t_fars = t_fars[masks]
-        valid_t_mids = t_mid[masks]
 
         # Could optimize a bit
         # embeddings = embeddings[masks]
-        sdfs = embeddings[..., 0:1].contiguous()
-        rgbs = embeddings[..., 1:4].contiguous()
+        masks = masks.view(-1, 1)
+        sdfs = embeddings[..., 0:1].contiguous().view(-1, 1)
+        rgbs = embeddings[..., 1:4].contiguous().view(-1, 3)
         sdf_grads = torch.autograd.grad(
             outputs=sdfs,
             inputs=x,
@@ -105,18 +104,15 @@ class PlainVoxels(nn.Module):
             create_graph=True,
         )[0]
 
-        sdfs = sdfs[masks]
-        rgbs = rgbs[masks]
-        sdf_grads = sdf_grads[masks]
         normals = F.normalize(sdf_grads, dim=-1)
         # print(f'normals.shape={normals.shape}, {normals}')
-        sigmas = self.sdf_to_sigma(sdfs)
+        sigmas = self.sdf_to_sigma(sdfs) * masks.float()
 
         weights = nerfacc.render_weight_from_density(
-            t_starts=valid_t_nears,
-            t_ends=valid_t_fars,
+            t_starts=t_nears,
+            t_ends=t_fars,
             sigmas=sigmas,
-            ray_indices=valid_ray_indices,
+            ray_indices=ray_indices,
             n_rays=len(rays_o),
         )
 
@@ -124,15 +120,15 @@ class PlainVoxels(nn.Module):
         # TODO: also can reuse the packed info
         rendered_rgb = nerfacc.accumulate_along_rays(
             weights=weights,
-            ray_indices=valid_ray_indices,
+            ray_indices=ray_indices,
             values=rgbs,
             n_rays=len(rays_o),
         )
 
         rendered_depth = nerfacc.accumulate_along_rays(
             weights=weights,
-            ray_indices=valid_ray_indices,
-            values=valid_t_mids,
+            ray_indices=ray_indices,
+            values=t_mid,
             n_rays=len(rays_o),
         )
         rays_near = rays_near.view(-1, 1) / rays_d_norm
@@ -141,14 +137,14 @@ class PlainVoxels(nn.Module):
 
         rendered_normals = nerfacc.accumulate_along_rays(
             weights=weights,
-            ray_indices=valid_ray_indices,
+            ray_indices=ray_indices,
             values=normals,
             n_rays=len(rays_o),
         )
 
         accumulated_weights = nerfacc.accumulate_along_rays(
             weights=weights,
-            ray_indices=valid_ray_indices,
+            ray_indices=ray_indices,
             values=None,
             n_rays=len(rays_o),
         )
@@ -160,8 +156,8 @@ class PlainVoxels(nn.Module):
             "normal": rendered_normals,
             "weights": accumulated_weights,
             "sdf_grads": sdf_grads,
-            "nears": rays_near,
-            "fars": rays_far,
+            "near": rays_near,
+            "far": rays_far,
         }
 
     def marching_cubes(self):
@@ -174,7 +170,7 @@ class PlainVoxels(nn.Module):
             color_fn=self.color_fn,
             normal_fn=self.normal_fn,
             iso_value=0.0,
-            weight_thr=0.5,
+            weight_thr=1,
         )
         return mesh
 
@@ -229,7 +225,7 @@ class PlainVoxels(nn.Module):
             grad_outputs=torch.ones_like(embeddings[..., 0], requires_grad=False),
             create_graph=True,
         )[0]
-        return grad_x
+        return grad_x * masks.float().view(-1, 1)
 
     def normal_fn(self, x):
         return F.normalize(self.grad_fn(x), dim=-1).contiguous()
@@ -246,6 +242,11 @@ if __name__ == "__main__":
     parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
     args = parser.parse_args()
     # fmt: on
+
+    import datetime
+
+    path = "logs/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    writer = SummaryWriter(path)
 
     # Load data
     dataset = ImageDataset(
@@ -277,102 +278,132 @@ if __name__ == "__main__":
     )
 
     optim = torch.optim.RMSprop(model.parameters(), lr=1e-3)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9999)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optim, 0.9)
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
-    pbar = tqdm(range(5001))
+    pbar = tqdm(range(20001))
+
+    jitter = None
+
+    def reset_jitter_():
+        jitter = (
+            (torch.rand(batch_size, 2, device=torch.device("cuda:0")) * 2 - 1)
+            * 0.5
+            * args.voxel_size
+        )
+
     for step in pbar:
         optim.zero_grad()
         datum = next(iter(train_dataloader))
         rays_o = datum["rays_o"]
         rays_d = datum["rays_d"]
         ray_norms = datum["rays_d_norm"]
-        result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0)
+        result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0, jitter=jitter)
 
         rgb_gt = datum["rgb"]
         normal_gt = datum["normal"]
         depth_gt = datum["depth"]
 
         rgb_loss = F.mse_loss(result["rgb"], rgb_gt)
-        # print(f'result[normal].shape={result["normal"].shape}, normal_gt.shape={normal_gt.shape}')
-        normal_loss = (
-            0.5 * ((result["normal"] - normal_gt).abs().sum(dim=1)).mean()
-            + 0.5 * (1 - (result["normal"] * normal_gt).sum(dim=1)).abs().mean()
-        )
+        normal_loss_l1 = F.l1_loss(result["normal"], normal_gt)
+        normal_loss_cos = (1 - (result["normal"] * normal_gt).sum(dim=-1)).mean()
+
         depth_loss = depth_loss_fn(
             result["depth"].view(-1, 32, 32),
             depth_gt.view(-1, 32, 32),
             torch.ones_like(depth_gt.view(-1, 32, 32)).bool(),
         )
 
-        eikonal_loss = (torch.norm(result["sdf_grads"], dim=-1) - 1).abs().mean()
+        eikonal_loss_ray = (torch.norm(result["sdf_grads"], dim=-1) - 1).abs().mean()
 
         uniform_samples = model.grid.uniform_sample(batch_size)
         uniform_sdf_grads = model.grad_fn(uniform_samples)
-        uniform_eikonal_loss = (torch.norm(uniform_sdf_grads, dim=-1) - 1).abs().mean()
+        eikonal_loss_uniform = (torch.norm(uniform_sdf_grads, dim=-1) - 1).abs().mean()
 
         loss = (
             rgb_loss
-            + 0.1 * normal_loss
+            + 0.05 * normal_loss_l1
+            + 0.05 * normal_loss_cos
             + 0.1 * depth_loss
-            + 0.1 * (eikonal_loss + uniform_eikonal_loss)
+            + 0.1 * eikonal_loss_ray
+            + 0.1 * eikonal_loss_uniform
         )
 
         loss.backward()
         pbar.set_description(
             f"loss: {loss.item():.4f},"
             f"rgb: {rgb_loss.item():.4f},"
-            f"normal: {normal_loss.item():.4f},"
+            f"normal_l1: {normal_loss_l1.item():.4f},"
+            f"normal_cos: {normal_loss_cos.item():.4f},"
             f"depth: {depth_loss.item():.4f},"
-            f"eikonal: {eikonal_loss.item():.4f}",
+            f"eikonal_ray: {eikonal_loss_ray.item():.4f}",
+            f"eikonal_uniform: {eikonal_loss_uniform.item():.4f}",
         )
         optim.step()
+        writer.add_scalar("loss/total", loss.item(), step)
+        writer.add_scalar("loss/rgb", rgb_loss.item(), step)
+        writer.add_scalar("loss/normal_l1", normal_loss_l1.item(), step)
+        writer.add_scalar("loss/normal_cos", normal_loss_cos.item(), step)
+        writer.add_scalar("loss/depth", depth_loss.item(), step)
+        writer.add_scalar("loss/eikonal_ray", eikonal_loss_ray.item(), step)
+        writer.add_scalar("loss/eikonal_uniform", eikonal_loss_uniform.item(), step)
 
         if step % 500 == 0:
             mesh = model.marching_cubes()
-            # o3d.visualization.draw([mesh])
-            scheduler.step()
+            o3d.io.write_triangle_mesh(f"{path}/mesh_{step}.ply", mesh.to_legacy())
 
-            # Evaluation
-            for i in range(dataset.num_images):
-                im_rgbs = []
-                im_weights = []
-                im_depths = []
-                im_normals = []
+            im_rgbs = []
+            im_weights = []
+            im_depths = []
+            im_normals = []
+            im_near = []
+            im_far = []
 
-                for b in range(batches_per_image):
-                    datum = next(iter(eval_dataloader))
-                    rays_o = datum["rays_o"]
-                    rays_d = datum["rays_d"]
-                    ray_norms = datum["rays_d_norm"]
-                    result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0)
+            for b in range(batches_per_image):
+                datum = next(iter(eval_dataloader))
+                rays_o = datum["rays_o"]
+                rays_d = datum["rays_d"]
+                ray_norms = datum["rays_d_norm"]
+                result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0)
 
-                    im_rgbs.append(result["rgb"].detach().cpu().numpy())
-                    im_weights.append(result["weights"].detach().cpu().numpy())
-                    im_depths.append(result["nears"].detach().cpu().numpy())
-                    im_normals.append(result["fars"].detach().cpu().numpy())
+                im_rgbs.append(result["rgb"].detach().cpu().numpy())
+                im_weights.append(result["weights"].detach().cpu().numpy())
+                im_depths.append(result["depth"].detach().cpu().numpy())
+                im_normals.append(result["normal"].detach().cpu().numpy())
+                im_near.append(result["near"].detach().cpu().numpy())
+                im_far.append(result["far"].detach().cpu().numpy())
 
-                im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(
-                    dataset.H, dataset.W, 3
-                )
-                im_weights = np.concatenate(im_weights, axis=0).reshape(
-                    dataset.H, dataset.W, 1
-                )
-                im_depths = np.concatenate(im_depths, axis=0).reshape(
-                    dataset.H, dataset.W, 1
-                )
-                im_normals = np.concatenate(im_normals, axis=0).reshape(
-                    dataset.H, dataset.W, 1
-                )
+            im_rgbs = np.concatenate(im_rgbs, axis=0).reshape(dataset.H, dataset.W, 3)
+            im_weights = np.concatenate(im_weights, axis=0).reshape(
+                dataset.H, dataset.W, 1
+            )
+            im_depths = np.concatenate(im_depths, axis=0).reshape(
+                dataset.H, dataset.W, 1
+            )
+            im_normals = (
+                np.concatenate(im_normals, axis=0).reshape(dataset.H, dataset.W, 3)
+                + 1.0
+            ) * 0.5
+            im_near = np.concatenate(im_near, axis=0).reshape(dataset.H, dataset.W, 1)
+            im_far = np.concatenate(im_far, axis=0).reshape(dataset.H, dataset.W, 1)
 
-                import matplotlib.pyplot as plt
+            import matplotlib.pyplot as plt
 
-                fig, axes = plt.subplots(2, 2)
-                axes[0, 0].imshow(im_rgbs)
-                axes[0, 1].imshow(im_weights)
-                axes[1, 0].imshow((im_depths))
-                axes[1, 1].imshow((im_normals))
-                plt.show()
+            fig, axes = plt.subplots(2, 3)
+            axes[0, 0].imshow(im_rgbs)
+            axes[0, 1].imshow(im_weights)
+            axes[0, 2].imshow(im_near)
+            axes[1, 0].imshow((im_depths))
+            axes[1, 1].imshow((im_normals))
+            axes[1, 2].imshow((im_far))
+            for i in range(2):
+                for j in range(3):
+                    axes[i, j].set_axis_off()
+            fig.tight_layout()
+            writer.add_figure("eval", fig, step)
+            plt.close(fig)
 
-                break
+            if step > 0:
+                scheduler.step()
+                reset_jitter_()

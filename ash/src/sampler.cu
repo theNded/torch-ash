@@ -267,7 +267,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> ray_sample(
             nullptr, max_samples_per_ray, grid2cell_multiplier, len);
     C10_CUDA_CHECK(cudaDeviceSynchronize());
 
-    std::cout << ray_sample_counts.to(torch::kFloat32).mean() << std::endl;
     at::Tensor prefix_sum_ray_sample_counts = at::cumsum(ray_sample_counts, 0);
 
     int64_t total_count =
