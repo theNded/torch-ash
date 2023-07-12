@@ -53,7 +53,6 @@ class TSDFFusion:
                 if isinstance(v, np.ndarray):
                     datum[k] = torch.from_numpy(v.astype(np.float32)).to(self.device)
             self.fuse_frame(datum)
-            print(i, self.grid.engine.size())
 
     @torch.no_grad()
     def unproject_depth_to_points(

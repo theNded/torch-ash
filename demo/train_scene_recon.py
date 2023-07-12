@@ -61,20 +61,20 @@ class PlainVoxels(nn.Module):
         print(f"hash map size after pruning: {self.grid.engine.size()}")
 
     def forward(self, rays_o, rays_d, rays_d_norm, near, far):
-        (ray_nears, ray_fars) = self.grid.ray_find_near_far(
+        (rays_near, rays_far) = self.grid.ray_find_near_far(
             rays_o=rays_o,
             rays_d=rays_d,
             t_min=near,
             t_max=far,
-            t_step=0.01,
+            t_step=0.01,  # no use
         )
 
         (ray_indices, t_nears, t_fars, prefix_sum_ray_samples,) = self.grid.ray_sample(
             rays_o=rays_o,
             rays_d=rays_d,
-            t_min=near,
-            t_max=far,
-            t_step=0.01,
+            rays_near=rays_near,
+            rays_far=rays_far,
+            max_samples_per_ray=96,
         )
 
         t_nears = t_nears.view(-1, 1)
@@ -135,11 +135,8 @@ class PlainVoxels(nn.Module):
             values=valid_t_mids,
             n_rays=len(rays_o),
         )
-        ray_nears = ray_nears.view(-1, 1) / rays_d_norm
-        ray_fars = ray_fars.view(-1, 1) / rays_d_norm
-        print(ray_nears.shape, ray_fars.shape)
-        print(ray_nears.min(), ray_nears.max())
-        print(ray_fars.min(), ray_fars.max())
+        rays_near = rays_near.view(-1, 1) / rays_d_norm
+        rays_far = rays_far.view(-1, 1) / rays_d_norm
         rendered_depth = rendered_depth / rays_d_norm
 
         rendered_normals = nerfacc.accumulate_along_rays(
@@ -163,8 +160,8 @@ class PlainVoxels(nn.Module):
             "normal": rendered_normals,
             "weights": accumulated_weights,
             "sdf_grads": sdf_grads,
-            "nears": ray_nears,
-            "fars": ray_fars,
+            "nears": rays_near,
+            "fars": rays_far,
         }
 
     def marching_cubes(self):
@@ -291,7 +288,7 @@ if __name__ == "__main__":
         rays_o = datum["rays_o"]
         rays_d = datum["rays_d"]
         ray_norms = datum["rays_d_norm"]
-        result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
+        result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0)
 
         rgb_gt = datum["rgb"]
         normal_gt = datum["normal"]
@@ -349,7 +346,7 @@ if __name__ == "__main__":
                     rays_o = datum["rays_o"]
                     rays_d = datum["rays_d"]
                     ray_norms = datum["rays_d_norm"]
-                    result = model(rays_o, rays_d, ray_norms, near=0.1, far=4.0)
+                    result = model(rays_o, rays_d, ray_norms, near=0.3, far=5.0)
 
                     im_rgbs.append(result["rgb"].detach().cpu().numpy())
                     im_weights.append(result["weights"].detach().cpu().numpy())
