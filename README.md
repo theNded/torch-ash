@@ -38,9 +38,9 @@ pip install . --verbose
 ```
 
 ## Engine (ASH)
-- The core is `ASHEngine`, a pytorch module implementing a parallel, collision-free, dynamic hash map from coordinates (`torch.IntTensor`) to indices (`torch.LongTensor`). It depends on [stdgpu](https://github.com/stotko/stdgpu).
-- Above `ASHEngine`, there are `HashSet` and `HashMap` which are wrappers around ASHEngine. A `HashSet` maps a coordinate to a boolean value, usually used for the `unique` operation. A `HashMap` maps a coordinate to a (dictionary) of values, allows fast insertion and accessing coordinate-value pairs.
-- Similar to `HashMap`, `HashEmbedding` maps coordinates to embeddings that is akin to `torch.nn.Embedding`.
+- The core is `ASHEngine`, a PyTorch module implementing a parallel, collision-free, dynamic hash map from coordinates (`torch.IntTensor`) to indices (`torch.LongTensor`). It depends on [stdgpu](https://github.com/stotko/stdgpu).
+- Above `ASHEngine`, there are `HashSet` and `HashMap` which are wrappers around ASHEngine. A `HashSet` maps a coordinate to a boolean value, usually used for the `unique` operation. A `HashMap` maps a coordinate to a (dictionary) of values, and allows fast insertion and accessing coordinate-value pairs.
+- Similar to `HashMap`, `HashEmbedding` maps coordinates to embeddings and is akin to `torch.nn.Embedding`.
 
 ### Usage
 ```python
@@ -62,9 +62,9 @@ all_indices, all_values = hashmap.items(return_indices=True, return_values=True)
 ## SparseDenseGrids for Surface Reconstruction
 `SparseDenseGrid` is the engine for direct/neural scene representation. It consists of sparse arrays of grids and dense arrays of cells. The idea is similar to [Instant-NGP](https://github.com/NVlabs/instant-ngp) and [Plenoxels](https://github.com/sxyu/svox2), but precise sparsity is achieved through spatial initialization and collision-free hashing. Essentially it is a modern version of [VoxelHashing](https://github.com/niessner/VoxelHashing).
 
-It has two wrappers for coordinate transform, `UnboundedSparseDenseGrid` for potentially dynamically increasing metric scenes, and `BoundedSparseDenseGrid` for scenes bounded in unit cubes. Trilinear interpolation and double backwards are implemented to support differentiable gradient computation. All these modules can be converted to and from state dicts by serializing the underlying hash map.
+It has two wrappers for coordinate transform, `UnboundedSparseDenseGrid` for potentially dynamically increasing metric scenes, and `BoundedSparseDenseGrid` for scenes bounded in unit cubes. Trilinear interpolation and double backward are implemented to support differentiable gradient computation. All these modules can be converted to and from state dicts by serializing the underlying hash map.
 
-The `SparseDenseGrid` does a good job without an MLP in fast reconstruction tasks (e.g. RGB-D fusion, differentiable volume rendering with a decent initialization), but with an MLP, there seems no advantages in comparison to Instant-NGP as of now. Potential extensions in this line are still in progress.
+The `SparseDenseGrid` does a good job without an MLP in fast reconstruction tasks (e.g. RGB-D fusion, differentiable volume rendering with a decent initialization), but with an MLP, there seem no advantages in comparison to Instant-NGP as of now. Potential extensions in this line are still in progress.
 
 ### Demo: RGB-D fusion [PAMI 22]
 RGB-D fusion takes in posed RGB-D images and creates colorized mesh, raw and filtered. Here, depth can either be sensor depth, or generated from a monocular depth prediction model (e.g. [omnidata](https://github.com/theNded/mini-omnidata)) with calibrated scales via [COLMAP](https://colmap.github.io/). Example datasets can be downloaded at [Google Drive](https://drive.google.com/drive/folders/12E4cTIIxmShV_ENkcvzKOQunsa0TqDVQ?usp=drive_link). Instructions for custom datasets will be available soon.
@@ -101,12 +101,12 @@ We start with a local 7x7x7 Gaussian filter to smooth the initialization.
   <td><img src="https://github.com/theNded/torch-ash/assets/6127282/f252b2f9-70c5-41fd-a94f-1c89f65dc9d1" width="480"/></td>
   </tr>
 </table>
-Volume rendering follows the initialization. The results will be written in `logs/datetime`. At each 500 iterations, mesh will be extracted and stored.
+
+Volume rendering follows the initialization. The results will be written in `logs/datetime`. At every 500 iterations, mesh will be extracted and stored. The optimization will start with ripples on the surfaces, but finally converge to smooth reconstructions as shown above.
+
 
 ## API Usage
----
-
-Here is a brief summary of basic usages, doc will be online soon.
+Here is a brief summary of basic usage, doc will be online soon.
 ### Allocation
 We first initialize a 3D sparse-dense grid with 10000 sparse grid blocks. Each sparse grid contains a dense 8^3=512 array of cells, whose size is 0.01m.
 ```python
@@ -118,7 +118,7 @@ grid = UboundedSparseDenseGrid(in_dim=3,
 ```
 
 ### Initialization
-We then spatially initialize the grid at input points (e.g. obtained point cloud, RGB-D scans). This results in coordinates and indices that supports index-based access.
+We then spatially initialize the grid at input points (e.g. obtained point cloud, RGB-D scans). This results in coordinates and indices that support index-based access.
 ```python
 with torch.no_grad():
     grid_coords, cell_coords, grid_indices, cell_indices = grid.spatial_init_(points)
@@ -128,7 +128,7 @@ with torch.no_grad():
 ```
 
 ### Optimization
-As a pytorch extension, first and second order autodiff are enabled by differentiable query.
+As a PyTorch extension, first and second-order autodiff are enabled by a differentiable query.
 ```python
 optim = torch.optim.SGD(grid.parameters(), lr=1e-3)
 for x, gt in batch:
@@ -149,13 +149,11 @@ for x, gt in batch:
     optim.step()
 ```
 
-
-
 ## Milestones
 - [x] Initial release
 - [x] Demo: RGB-(pseudo)D SDF fusion
 - [x] Demo: SDF refinement from volume rendering
+- [ ] Better instructions and documentation
 - [ ] Demo: LiDAR SDF fusion
 - [ ] Demo: MLP integration
-- [ ] Documentation page
 - [ ] CPU counterpart
