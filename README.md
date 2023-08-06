@@ -97,8 +97,8 @@ python demo/train_scene_recon.py --path /path/to/dataset/samples --voxel_size 0.
 We start with a local 7x7x7 Gaussian filter to smooth the initialization.
 <table>
   <tr>
-  <td><img src="https://github.com/theNded/torch-ash/assets/6127282/793ed2ce-7e8b-476d-a4ef-996230f82a27" width="480"/></td>
-  <td><img src="https://github.com/theNded/torch-ash/assets/6127282/f252b2f9-70c5-41fd-a94f-1c89f65dc9d1" width="480"/></td>
+  <td><img src="https://github.com/theNded/theNded.github.io/blob/master/assets/images/ash-nofilter.png" width="480"/></td>
+  <td><img src="https://github.com/theNded/theNded.github.io/blob/master/assets/images/ash-filtered.png" width="480"/></td>
   </tr>
 </table>
 
