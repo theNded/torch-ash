@@ -34,6 +34,7 @@ Optionally install [nerfacc](https://pypi.org/project/nerfacc/0.2.1/) for volume
 
 cmake is required in the conda environment for compiling the source code.
 ```
+git clone --recursive git@github.com:theNded/torch-ash.git
 pip install . --verbose
 ```
 
