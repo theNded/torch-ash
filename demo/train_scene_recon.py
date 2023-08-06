@@ -88,10 +88,7 @@ class PlainVoxels(nn.Module):
 
         x.requires_grad_(True)
         embeddings, masks = self.grid(x, interpolation="linear")
-
-        # Used for filtering out empty voxels
         # Could optimize a bit
-        # embeddings = embeddings[masks]
         masks = masks.view(-1, 1)
         sdfs = embeddings[..., 0:1].contiguous().view(-1, 1)
         rgbs = embeddings[..., 1:4].contiguous().view(-1, 3)
@@ -145,7 +142,6 @@ class PlainVoxels(nn.Module):
             values=None,
             n_rays=len(rays_o),
         )
-        # print(f'rendered_normals.shape={rendered_normals.shape}: {rendered_normals}')
 
         return {
             "rgb": rendered_rgb,
@@ -259,6 +255,10 @@ if __name__ == "__main__":
     model.fuse_dataset(dataset, dilation)
     model.grid.gaussian_filter_(7, 1)
     mesh = model.marching_cubes()
+<<<<<<< HEAD
+=======
+    # o3d.visualization.draw([mesh, model.occupancy_lineset()])
+>>>>>>> 522cf9273819b1d7cc6ae9f0f3ad3df9ab7faae8
 
     batch_size = 4096
     pixel_count = dataset.H * dataset.W
