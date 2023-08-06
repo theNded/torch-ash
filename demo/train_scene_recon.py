@@ -88,10 +88,8 @@ class PlainVoxels(nn.Module):
 
         x.requires_grad_(True)
         embeddings, masks = self.grid(x, interpolation="linear")
-        # import ipdb; ipdb.set_trace()
 
         # Used for filtering out empty voxels
-
         # Could optimize a bit
         # embeddings = embeddings[masks]
         masks = masks.view(-1, 1)
@@ -105,7 +103,6 @@ class PlainVoxels(nn.Module):
         )[0]
 
         normals = F.normalize(sdf_grads, dim=-1)
-        # print(f'normals.shape={normals.shape}, {normals}')
         sigmas = self.sdf_to_sigma(sdfs) * masks.float()
 
         weights = nerfacc.render_weight_from_density(
@@ -262,7 +259,6 @@ if __name__ == "__main__":
     model.fuse_dataset(dataset, dilation)
     model.grid.gaussian_filter_(7, 1)
     mesh = model.marching_cubes()
-    # o3d.visualization.draw([mesh, model.occupancy_lineset()])
 
     batch_size = 4096
     pixel_count = dataset.H * dataset.W
