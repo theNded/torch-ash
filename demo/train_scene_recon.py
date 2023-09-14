@@ -240,6 +240,9 @@ if __name__ == "__main__":
     parser.add_argument("--voxel_size", type=float, default=0.015)
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
     parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
+    parser.add_argument("--steps", type=int, default=2000)
+    parser.add_argument("--train_batch_size", type=int, default=65536)
+    parser.add_argument("--eval_batch_size", type=int, default=4096)
     args = parser.parse_args()
     # fmt: on
 
@@ -264,17 +267,22 @@ if __name__ == "__main__":
     mesh = model.marching_cubes()
     # o3d.visualization.draw([mesh, model.occupancy_lineset()])
 
-    batch_size = 4096
+    train_batch_size = args.train_batch_size
+    eval_batch_size = args.eval_batch_size
+
     pixel_count = dataset.H * dataset.W
-    batches_per_image = pixel_count // batch_size
-    assert pixel_count % batch_size == 0
+    eval_batches_per_image = pixel_count // eval_batch_size
+    assert pixel_count % eval_batch_size == 0
 
     eval_dataloader = Dataloader(
-        dataset, batch_size=batch_size, shuffle=False, device=torch.device("cuda:0")
+        dataset,
+        batch_size=eval_batch_size,
+        shuffle=False,
+        device=torch.device("cuda:0"),
     )
 
     train_dataloader = Dataloader(
-        dataset, batch_size=batch_size, shuffle=True, device=torch.device("cuda:0")
+        dataset, batch_size=train_batch_size, shuffle=True, device=torch.device("cuda:0")
     )
 
     optim = torch.optim.RMSprop(model.parameters(), lr=1e-3)
@@ -282,13 +290,13 @@ if __name__ == "__main__":
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
-    pbar = tqdm(range(20001))
+    pbar = tqdm(range(args.steps + 1))
 
     jitter = None
 
     def reset_jitter_():
         jitter = (
-            (torch.rand(batch_size, 2, device=torch.device("cuda:0")) * 2 - 1)
+            (torch.rand(train_batch_size, 2, device=torch.device("cuda:0")) * 2 - 1)
             * 0.5
             * args.voxel_size
         )
@@ -317,7 +325,7 @@ if __name__ == "__main__":
 
         eikonal_loss_ray = (torch.norm(result["sdf_grads"], dim=-1) - 1).abs().mean()
 
-        uniform_samples = model.grid.uniform_sample(batch_size)
+        uniform_samples = model.grid.uniform_sample(train_batch_size)
         uniform_sdf_grads = model.grad_fn(uniform_samples)
         eikonal_loss_uniform = (torch.norm(uniform_sdf_grads, dim=-1) - 1).abs().mean()
 
@@ -360,7 +368,7 @@ if __name__ == "__main__":
             im_near = []
             im_far = []
 
-            for b in range(batches_per_image):
+            for b in range(eval_batches_per_image):
                 datum = next(iter(eval_dataloader))
                 rays_o = datum["rays_o"]
                 rays_d = datum["rays_d"]
