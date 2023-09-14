@@ -240,6 +240,7 @@ if __name__ == "__main__":
     parser.add_argument("--voxel_size", type=float, default=0.015)
     parser.add_argument("--depth_type", type=str, default="sensor", choices=["sensor", "learned"])
     parser.add_argument("--depth_max", type=float, default=5.0, help="max depth value to truncate in meters")
+    parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument("--train_batch_size", type=int, default=65536)
     parser.add_argument("--eval_batch_size", type=int, default=4096)
     args = parser.parse_args()
@@ -289,7 +290,7 @@ if __name__ == "__main__":
 
     # Training
     depth_loss_fn = ScaleAndShiftInvariantLoss()
-    pbar = tqdm(range(20001))
+    pbar = tqdm(range(args.steps + 1))
 
     jitter = None
 
